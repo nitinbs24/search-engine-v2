@@ -1,0 +1,8 @@
+# Everything the Python unit tests need. No torch: tests use fake embedders.
+pytest==8.3.4
+fastapi==0.115.6
+httpx==0.28.1
+langchain-text-splitters==0.3.4
+grpcio==1.68.1
+grpcio-tools==1.68.1
+tzdata==2024.2
