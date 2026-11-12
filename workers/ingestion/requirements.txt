@@ -1,0 +1,5 @@
+httpx==0.28.1
+confluent-kafka==2.6.1
+minio==7.2.12
+opensearch-py==2.8.0
+langchain-text-splitters==0.3.4
