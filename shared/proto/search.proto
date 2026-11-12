@@ -8,6 +8,8 @@ option go_package = "search-engine-v2/backend/proto";
 // to build the OpenSearch query. It never talks to OpenSearch itself.
 service SearchWorker {
   rpc ParseQuery(ParseQueryRequest) returns (ParseQueryResponse);
+  // One relevance score per passage, in input order; higher is more relevant.
+  rpc Rerank(RerankRequest) returns (RerankResponse);
 }
 
 message ParseQueryRequest {
@@ -18,6 +20,17 @@ message ParseQueryResponse {
   repeated string keywords = 1;   // for the BM25 leg
   Filters filters = 2;
   repeated float text_vector = 3; // for the kNN leg on text_embedding
+  repeated float image_vector = 4; // for the kNN leg on image_embedding
+  string clean_query = 5;          // the query without filter phrases: what was embedded, and what to rerank against
+}
+
+message RerankRequest {
+  string query = 1;
+  repeated string passages = 2;
+}
+
+message RerankResponse {
+  repeated float scores = 1;
 }
 
 // Unset fields (empty list, 0, "") mean "no restriction".

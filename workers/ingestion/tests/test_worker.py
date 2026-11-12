@@ -1,7 +1,9 @@
 import asyncio
+import io
 
 import httpx
 import pytest
+from PIL import Image
 
 from chunker import TextChunker
 from main import IngestionWorker
@@ -21,8 +23,11 @@ def created_event(key="reports/q1.txt", size=2400):
 
 
 class FakeMinio:
+    def __init__(self, data=TEXT.encode()):
+        self.data = data
+
     def get_object(self, bucket, key):
-        return httpx.Response(200, content=TEXT.encode())  # has .read() and .close()
+        return httpx.Response(200, content=self.data)  # has .read() and .close()
 
 
 class FakeTika:
@@ -34,8 +39,15 @@ class FakeTika:
 
 
 class FakeModel:
+    def __init__(self):
+        self.images = []
+
     async def embed_texts(self, texts):
         return [[0.5, 0.5] for _ in texts]
+
+    async def embed_image(self, data):
+        self.images.append(data)
+        return [0.1, 0.2]
 
 
 class FakeIndex:
@@ -49,8 +61,57 @@ class FakeIndex:
         self.deleted.append((bucket, key))
 
 
-def worker(index, tika=None):
-    return IngestionWorker(FakeMinio(), tika or FakeTika(), TextChunker(), FakeModel(), index)
+def worker(index, tika=None, minio=None, model=None):
+    return IngestionWorker(minio or FakeMinio(), tika or FakeTika(), TextChunker(), model or FakeModel(), index)
+
+
+def jpeg(size=(40, 20), exif=True):
+    image = Image.new("RGB", size, "red")
+    tags = Image.Exif()
+    if exif:
+        tags[271], tags[272] = "Canon", "EOS R5"
+        tags[0x8769] = {36867: "2024:03:15 14:22:05"}
+    buf = io.BytesIO()
+    image.save(buf, "JPEG", exif=tags)
+    return buf.getvalue()
+
+
+def image_event(key="photos/beach.jpg"):
+    event = created_event(key)
+    event["Records"][0]["s3"]["object"]["contentType"] = "image/jpeg"
+    return event
+
+
+def test_jpeg_upload_is_one_document_with_vector_and_filename_exif_text():
+    index, model = FakeIndex(), FakeModel()
+    asyncio.run(worker(index, minio=FakeMinio(jpeg()), model=model).process_event(image_event()))
+
+    (doc,) = index.docs
+    assert doc["image_embedding"] == [0.1, 0.2] and "text_embedding" not in doc
+    assert (doc["_id"], doc["chunk_index"], doc["chunk_total"]) == ("uploads/photos/beach.jpg#0", 0, 1)
+    assert (doc["bucket"], doc["filename"], doc["extension"], doc["mime_type"]) == ("uploads", "beach.jpg", "jpg", "image/jpeg")
+    for word in ("beach.jpg", "Canon", "EOS R5", "2024:03:15"):
+        assert word in doc["chunk_text"]
+    assert len(model.images) == 1
+
+
+def test_large_image_is_bounded_and_upright_before_embedding():
+    model = FakeModel()
+    big = Image.new("RGB", (4000, 1000))
+    exif = Image.Exif()
+    exif[274] = 6  # rotate 90 degrees: the upright image is 1000 wide, 4000 tall
+    buf = io.BytesIO()
+    big.save(buf, "JPEG", exif=exif)
+    asyncio.run(worker(FakeIndex(), minio=FakeMinio(buf.getvalue()), model=model).process_event(image_event()))
+    sent = Image.open(io.BytesIO(model.images[0]))
+    assert max(sent.size) == 2048 and sent.height > sent.width
+
+
+def test_undecodable_image_raises_so_the_message_reaches_the_dlq():
+    index = FakeIndex()
+    with pytest.raises(Exception):
+        asyncio.run(worker(index, minio=FakeMinio(b"not an image")).process_event(image_event()))
+    assert index.docs == []
 
 
 def test_text_upload_is_indexed_as_chunks_with_embeddings():
@@ -106,6 +167,15 @@ def test_model_client_sends_texts_in_batches_and_keeps_order():
 
     assert batches == [64, 64, 22]
     assert vectors == [[float(i)] for i in range(150)]
+
+
+def test_model_client_posts_image_bytes_and_returns_the_vector():
+    def handler(request):
+        assert request.url.path == "/embed/image" and request.content == b"bytes"
+        return httpx.Response(200, json={"embedding": [1.0, 2.0]})
+
+    client = ModelClient("http://x", transport=httpx.MockTransport(handler))
+    assert asyncio.run(client.embed_image(b"bytes")) == [1.0, 2.0]
 
 
 def test_model_client_raises_on_server_error():

@@ -14,3 +14,8 @@ class ModelClient:
             r.raise_for_status()
             vectors.extend(r.json()["embeddings"])
         return vectors
+
+    async def embed_image(self, data: bytes) -> list[float]:
+        r = await self._http.post("/embed/image", content=data, headers={"Content-Type": "application/octet-stream"})
+        r.raise_for_status()
+        return r.json()["embedding"]

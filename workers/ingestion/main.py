@@ -11,6 +11,8 @@ import signal
 from datetime import datetime, timezone
 from urllib.parse import unquote_plus
 
+import image_handler
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
 log = logging.getLogger("ingestion")
 
@@ -48,8 +50,28 @@ class IngestionWorker:
 
         if mime == "application/octet-stream":
             mime = await self.tika.detect_type(data) or mime
+        filename = key.rsplit("/", 1)[-1]
+        common = {
+            "bucket": bucket,
+            "object_key": key,
+            "filename": filename,
+            "extension": filename.rsplit(".", 1)[-1].lower() if "." in filename else "",
+            "mime_type": mime,
+            "size_bytes": size,
+            "uploaded_at": record["eventTime"],
+            "indexed_at": datetime.now(timezone.utc).isoformat(),
+            "title": filename,
+            "author": "",
+        }
         if mime.startswith("image/"):
-            log.warning("skipped %s/%s: images are not indexed yet", bucket, key)
+            # Raises on undecodable bytes, so the message goes to the dead-letter topic.
+            jpeg, facts = await asyncio.to_thread(image_handler.prepare, data)
+            self.index.bulk_index([{
+                **common, "_id": f"{bucket}/{key}#0", "chunk_index": 0, "chunk_total": 1,
+                "chunk_text": image_handler.describe(filename, facts),
+                "image_embedding": await self.model.embed_image(jpeg),
+            }])
+            log.info("indexed image %s/%s", bucket, key)
             return
 
         extracted = await self.tika.extract(data, mime)
@@ -61,21 +83,9 @@ class IngestionWorker:
             return
         vectors = await self.model.embed_texts([c.text for c in chunks])
 
-        filename = key.rsplit("/", 1)[-1]
         meta = extracted.metadata
-        common = {
-            "bucket": bucket,
-            "object_key": key,
-            "filename": filename,
-            "extension": filename.rsplit(".", 1)[-1].lower() if "." in filename else "",
-            "mime_type": mime,
-            "size_bytes": size,
-            "uploaded_at": record["eventTime"],
-            "indexed_at": datetime.now(timezone.utc).isoformat(),
-            "chunk_total": len(chunks),
-            "title": meta.get("dc:title") or filename,
-            "author": meta.get("dc:creator") or "",
-        }
+        common |= {"chunk_total": len(chunks), "title": meta.get("dc:title") or filename,
+                   "author": meta.get("dc:creator") or ""}
         self.index.bulk_index([
             {**common, "_id": f"{bucket}/{key}#{c.chunk_index}", "chunk_index": c.chunk_index,
              "chunk_text": c.text, "text_embedding": v}

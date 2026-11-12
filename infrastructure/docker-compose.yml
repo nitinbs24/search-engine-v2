@@ -213,8 +213,13 @@ services:
       SEARCH_WORKER_ADDR: search-worker:50051
       OPENSEARCH_URL: http://opensearch:9200
       OPENSEARCH_INDEX: ${OPENSEARCH_INDEX}
+      REDIS_ADDR: redis:6379
+      # empty means the default compiled into the backend
+      RERANK_MIN_SCORE: ${RERANK_MIN_SCORE:-}
+      IMAGE_MIN_SCORE: ${IMAGE_MIN_SCORE:-}
     depends_on:
       search-worker: {condition: service_healthy}
+      redis: {condition: service_healthy}
       opensearch-init: {condition: service_completed_successfully}
     healthcheck:
       test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://localhost:8080/health"]
