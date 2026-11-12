@@ -43,7 +43,7 @@ Report bug IDs (S1, I5, …) refer to `docs/ANALYSIS_REPORT.md`.
 ### Checkpoint A
 - [x] `make up && make smoke` green · all unit tests green
 - [ ] Owner review
-- [ ] `/coderabbit:code-review`
+- [x] `/coderabbit:code-review` — 14 findings; 8 fixed, #1 → T11, #11 → T17, #13/#14 → T10, #8 and #9 left open
 
 ## Phase 2 — Search quality
 

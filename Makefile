@@ -23,6 +23,7 @@ test: ## Run all unit tests
 		mkdir -p workers/search/proto_gen && export PYTHONPATH=/src/workers/search/proto_gen && \
 		python -m grpc_tools.protoc -I shared/proto --python_out=$$PYTHONPATH --grpc_python_out=$$PYTHONPATH search.proto && \
 		for d in $(PY_TESTS); do echo "== $$d"; (cd $$d && python -m pytest -q -p no:cacheprovider) || exit 1; done'
+	docker run --rm -v "$(CURDIR)/frontend/lib":/src:ro node:20-alpine node --test /src
 	docker build -q --target test -f backend/Dockerfile . >/dev/null && echo "== backend: go vet and go test passed"
 
 smoke: ## Upload a file and find it through the API
