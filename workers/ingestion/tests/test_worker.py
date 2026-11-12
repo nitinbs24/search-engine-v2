@@ -27,7 +27,7 @@ class FakeMinio:
         self.data = data
 
     def get_object(self, bucket, key):
-        return httpx.Response(200, content=self.data)  # has .read() and .close()
+        return io.BytesIO(self.data)  # like the real response: read(amt) and close()
 
 
 class FakeTika:
@@ -52,13 +52,18 @@ class FakeModel:
 
 class FakeIndex:
     def __init__(self):
-        self.docs, self.deleted = [], []
+        self.docs, self.deleted, self.fail_bulk = [], [], False
 
     def bulk_index(self, docs):
-        self.docs.extend(docs)
+        if self.fail_bulk:
+            raise RuntimeError("bulk failed")
+        ids = {d["_id"] for d in docs}  # same id overwrites, as in OpenSearch
+        self.docs = [d for d in self.docs if d["_id"] not in ids] + list(docs)
 
-    def delete_by_object_key(self, bucket, key):
+    def delete_by_object_key(self, bucket, key, keep_ids=()):
         self.deleted.append((bucket, key))
+        self.docs = [d for d in self.docs
+                     if (d["bucket"], d["object_key"]) != (bucket, key) or d["_id"] in keep_ids]
 
 
 def worker(index, tika=None, minio=None, model=None):
@@ -154,6 +159,55 @@ def test_failed_extraction_raises_so_the_message_reaches_the_dlq():
         asyncio.run(worker(FakeIndex(), tika).process_event(created_event()))
 
 
+def test_oversized_file_raises_naming_size_and_limit_and_is_not_downloaded():
+    minio = FakeMinio()
+    minio.get_object = None  # must not be called
+    with pytest.raises(RuntimeError, match=r"too large.*200000000.*104857600"):
+        asyncio.run(worker(FakeIndex(), minio=minio).process_event(created_event(size=200_000_000)))
+
+
+def test_one_failing_record_does_not_skip_the_others_in_the_event():
+    event = created_event("a.txt")
+    event["Records"] += created_event("b.txt", size=200_000_000)["Records"] + created_event("c.txt")["Records"]
+    index = FakeIndex()
+    with pytest.raises(RuntimeError, match="b.txt"):
+        asyncio.run(worker(index).process_event(event))
+    assert {d["object_key"] for d in index.docs} == {"a.txt", "c.txt"}
+
+
+@pytest.mark.parametrize("text", ["", "   \n", "too short"])
+def test_file_without_extractable_text_is_indexed_by_filename(text):
+    index = FakeIndex()
+    tika = FakeTika(ExtractionResult(text=text, metadata={"dc:title": "Scan 7", "dc:creator": "Ana"}))
+    asyncio.run(worker(index, tika).process_event(created_event("scans/invoice.pdf")))
+
+    (doc,) = index.docs
+    assert (doc["_id"], doc["chunk_index"], doc["chunk_total"]) == ("uploads/scans/invoice.pdf#0", 0, 1)
+    assert "text_embedding" not in doc and "image_embedding" not in doc
+    for word in ("invoice.pdf", "Scan 7", "Ana"):
+        assert word in doc["chunk_text"]
+    assert (doc["bucket"], doc["filename"], doc["extension"], doc["size_bytes"]) == ("uploads", "invoice.pdf", "pdf", 2400)
+
+
+def test_reupload_with_fewer_chunks_leaves_only_the_new_chunks():
+    index = FakeIndex()
+    asyncio.run(worker(index).process_event(created_event()))
+    assert len(index.docs) > 2
+    short = ExtractionResult(text="Only two short paragraphs here.\n\n" + "Second paragraph text. " * 20)
+    asyncio.run(worker(index, FakeTika(short)).process_event(created_event()))
+    assert sorted(d["chunk_index"] for d in index.docs) == list(range(len(index.docs))) and len(index.docs) <= 2
+
+
+def test_replacing_text_with_image_or_no_text_leaves_one_document():
+    index = FakeIndex()
+    asyncio.run(worker(index).process_event(created_event("f")))
+    assert len(index.docs) > 1
+    asyncio.run(worker(index, minio=FakeMinio(jpeg())).process_event(image_event("f")))
+    assert [d["_id"] for d in index.docs] == ["uploads/f#0"] and "image_embedding" in index.docs[0]
+    asyncio.run(worker(index, FakeTika(ExtractionResult(text=""))).process_event(created_event("f")))
+    assert len(index.docs) == 1 and "image_embedding" not in index.docs[0]
+
+
 def test_model_client_sends_texts_in_batches_and_keeps_order():
     batches = []
 
@@ -185,34 +239,42 @@ def test_model_client_raises_on_server_error():
 
 
 class FakeMessage:
+    def __init__(self, value=b"not json", headers=None):  # bad JSON fails processing: dead-letter path
+        self._value, self._headers = value, headers
+
     def value(self):
-        return b"not json"  # fails processing, so the worker must use the dead-letter topic
+        return self._value
+
+    def headers(self):
+        return self._headers
 
     def error(self):
         return None
 
 
 class FakeConsumer:
-    def __init__(self, worker):
-        self.worker, self.committed = worker, []
+    def __init__(self, worker, messages=None):
+        self.worker, self.messages, self.committed, self.closed = worker, list(messages or [FakeMessage()]), [], False
 
     def poll(self, timeout):
-        self.worker.stop = True  # one message, then the loop ends
-        return FakeMessage()
+        msg = self.messages.pop(0)
+        self.worker.stop = not self.messages  # the loop ends after the last message
+        return msg
 
-    def commit(self, msg):
+    def commit(self, msg, asynchronous=True):
+        assert asynchronous is False  # an async commit can be lost on shutdown or rebalance
         self.committed.append(msg)
 
     def close(self):
-        pass
+        self.closed = True
 
 
 class FakeDlq:
     def __init__(self, delivery_error=None):
         self.delivery_error, self.produced = delivery_error, []
 
-    def produce(self, topic, value, on_delivery):
-        self.produced.append(topic)
+    def produce(self, topic, value, on_delivery, headers=None):
+        self.produced.append((topic, value, headers))
         self._report = on_delivery
 
     def flush(self, timeout):
@@ -224,12 +286,97 @@ def test_failed_message_is_committed_once_the_dead_letter_write_is_confirmed():
     w = worker(FakeIndex())
     consumer, dlq = FakeConsumer(w), FakeDlq()
     asyncio.run(w.run(consumer, dlq, "dlq"))
-    assert dlq.produced == ["dlq"] and len(consumer.committed) == 1
+    assert [p[0] for p in dlq.produced] == ["dlq"] and len(consumer.committed) == 1
 
 
 def test_offset_is_not_committed_when_the_dead_letter_write_fails():
     w = worker(FakeIndex())
     consumer, dlq = FakeConsumer(w), FakeDlq(delivery_error="broker rejected the message")
-    with pytest.raises(RuntimeError, match="dead-letter"):
+    with pytest.raises(RuntimeError, match="could not deliver"):
         asyncio.run(w.run(consumer, dlq, "dlq"))
     assert consumer.committed == []
+    assert consumer.closed  # leave the group at once so the partition is reassigned
+
+
+def test_messages_are_committed_in_the_order_they_were_polled():
+    w = worker(FakeIndex())
+    messages = [FakeMessage() for _ in range(3)]
+    consumer = FakeConsumer(w, messages)
+    asyncio.run(w.run(consumer, FakeDlq(), "dlq"))
+    assert consumer.committed == messages
+
+
+def test_stop_during_a_message_lets_it_finish_and_commit_then_closes_without_polling_again():
+    w = worker(FakeIndex())
+    messages = [FakeMessage(b"{}"), FakeMessage(b"{}")]  # valid JSON: reaches process_event
+    consumer = FakeConsumer(w, messages)
+
+    async def stop_while_processing(event):
+        w.stop = True  # SIGTERM arrives mid-message
+    w.process_event = stop_while_processing
+    asyncio.run(w.run(consumer, FakeDlq(), "dlq"))
+    assert consumer.committed == messages[:1] and len(consumer.messages) == 1 and consumer.closed
+
+
+def test_a_failure_during_a_stop_is_not_committed_when_it_cannot_be_dead_lettered():
+    w = worker(FakeIndex())
+    consumer = FakeConsumer(w, [FakeMessage(), FakeMessage()])
+    with pytest.raises(RuntimeError):
+        asyncio.run(w.run(consumer, FakeDlq(delivery_error="down"), "dlq"))
+    assert consumer.committed == []
+
+
+def test_retry_count_header_is_carried_onto_the_dead_letter_record():
+    w = worker(FakeIndex())
+    dlq = FakeDlq()
+    asyncio.run(w.run(FakeConsumer(w, [FakeMessage(headers=[("retry-count", b"2")])]), dlq, "dlq"))
+    assert dlq.produced[0][2] == [("retry-count", b"2")]
+
+
+def test_a_first_failure_has_no_retry_header_to_carry():
+    w = worker(FakeIndex())
+    dlq = FakeDlq()
+    asyncio.run(w.run(FakeConsumer(w), dlq, "dlq"))
+    assert dlq.produced[0][2] == []
+
+
+def test_download_never_reads_past_the_size_limit_even_when_the_event_size_is_wrong(monkeypatch):
+    monkeypatch.setattr("main.MAX_FILE_SIZE_BYTES", 100)
+    reads = []
+
+    class Spy(io.BytesIO):
+        def read(self, amt=-1):
+            reads.append(amt)
+            return super().read(amt)
+
+    class SpyMinio(FakeMinio):
+        def get_object(self, bucket, key):
+            return Spy(self.data)
+
+    index = FakeIndex()
+    with pytest.raises(RuntimeError, match="too large"):
+        asyncio.run(worker(index, minio=SpyMinio(b"x" * 500)).process_event(created_event(size=10)))
+    assert reads == [101] and index.docs == []
+
+
+def test_download_runs_off_the_event_loop_thread():
+    import threading
+    seen = []
+
+    class ThreadMinio(FakeMinio):
+        def get_object(self, bucket, key):
+            seen.append(threading.current_thread())
+            return super().get_object(bucket, key)
+
+    asyncio.run(worker(FakeIndex(), minio=ThreadMinio()).process_event(created_event()))
+    assert seen and seen[0] is not threading.main_thread()
+
+
+def test_failed_reindex_keeps_the_previous_version_searchable():
+    index = FakeIndex()
+    asyncio.run(worker(index).process_event(created_event()))
+    before = list(index.docs)
+    index.fail_bulk = True
+    with pytest.raises(RuntimeError, match="bulk failed"):
+        asyncio.run(worker(index).process_event(created_event()))
+    assert index.docs == before
