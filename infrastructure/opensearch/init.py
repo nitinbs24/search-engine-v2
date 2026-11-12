@@ -14,6 +14,15 @@ KEYWORD = {"type": "keyword"}
 DATE = {"type": "date", "format": "strict_date_optional_time||epoch_millis"}
 
 
+def vector_field(dimension: int) -> dict:
+    return {
+        "type": "knn_vector",
+        "dimension": dimension,
+        # lucene supports filtered kNN; nmslib is deprecated.
+        "method": {"name": "hnsw", "engine": "lucene", "space_type": "cosinesimil"},
+    }
+
+
 def index_body(spec: dict) -> dict:
     return {
         "settings": {
@@ -44,12 +53,8 @@ def index_body(spec: dict) -> dict:
                 "chunk_text": {"type": "text"},
                 "title": {"type": "text"},
                 "author": {"type": "text"},
-                "text_embedding": {
-                    "type": "knn_vector",
-                    "dimension": spec["text"]["dimension"],
-                    # lucene supports filtered kNN; nmslib is deprecated.
-                    "method": {"name": "hnsw", "engine": "lucene", "space_type": "cosinesimil"},
-                },
+                "text_embedding": vector_field(spec["text"]["dimension"]),
+                "image_embedding": vector_field(spec["image"]["dimension"]),
             }
         },
     }
@@ -68,10 +73,11 @@ def ensure(request, index: str, spec: dict) -> None:
     if status == 404:
         request("PUT", f"/{index}", index_body(spec))
         return
-    have = existing[index]["mappings"]["properties"]["text_embedding"]["dimension"]
-    want = spec["text"]["dimension"]
-    if have != want:
-        sys.exit(f"index {index} has text_embedding dimension {have}, model_spec.json says {want}: delete the index and re-ingest")
+    for kind in ("text", "image"):
+        have = existing[index]["mappings"]["properties"].get(f"{kind}_embedding", {}).get("dimension")
+        want = spec[kind]["dimension"]
+        if have != want:
+            sys.exit(f"index {index} has {kind}_embedding dimension {have}, model_spec.json says {want}: delete the index and re-ingest")
 
 
 def http(base: str):
