@@ -2,5 +2,12 @@
   "text": {
     "name": "sentence-transformers/all-MiniLM-L6-v2",
     "dimension": 384
+  },
+  "reranker": {
+    "name": "cross-encoder/ms-marco-MiniLM-L-6-v2"
+  },
+  "image": {
+    "name": "sentence-transformers/clip-ViT-B-32",
+    "dimension": 512
   }
 }
