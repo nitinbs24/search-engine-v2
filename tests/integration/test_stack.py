@@ -99,7 +99,9 @@ def corpus(minio):
 
 def test_model_server_has_every_model_loaded():
     body = httpx.get(f"{MODEL_SERVER}/health").json()
-    assert body["status"] == "ok" and set(body["models"]) == {"text", "image", "reranker"}
+    models = body["models"]
+    assert body["status"] == "ok" and all(models[k] for k in ("text", "image", "reranker"))
+    assert models["answer"] is None  # optional, off by default
 
 
 def test_backend_health_reports_its_dependencies():
@@ -202,3 +204,48 @@ def test_undecodable_image_is_not_indexed(minio):
         assert indexed_chunks(key) == 0
     finally:
         minio.remove_object(BUCKET, key)
+
+
+# ── ingestion reliability ─────────────────────────────────────────────────────
+
+def test_shorter_reupload_leaves_no_stale_chunks(minio):
+    key = f"{PREFIX}/shrinks-{TOKEN}.txt"
+    try:
+        put(minio, key, K8S_TEXT.encode(), "text/plain")
+        wait_until(lambda: indexed_chunks(key) > 1, "the long version is indexed as several chunks")
+        put(minio, key, b"A single short sentence about lighthouse keepers and their lamps.", "text/plain")
+        wait_until(lambda: indexed_chunks(key) == 1, "only the short version's one chunk remains")
+    finally:
+        minio.remove_object(BUCKET, key)
+
+
+def test_file_without_text_is_still_found_by_its_name(minio):
+    key = f"{PREFIX}/zebrafish-ledger-{TOKEN}.txt"
+    try:
+        put(minio, key, b"   \n\n   ", "text/plain")
+        wait_until(lambda: indexed_chunks(key) == 1, "the empty file is indexed as one document")
+        assert key in keys(search("zebrafish ledger"))
+    finally:
+        minio.remove_object(BUCKET, key)
+
+
+# ── summary panel ─────────────────────────────────────────────────────────────
+
+def test_top_text_result_carries_its_best_sentence_as_highlight():
+    top = search(K8S_QUERY)[0]
+    assert top["highlight"] and top["highlight"] in top["snippet"]
+
+
+def test_image_result_has_no_highlight():
+    hit = next(r for r in search("a red circle") if r["object_key"] == IMAGE)
+    assert not hit.get("highlight")
+
+
+def test_answer_is_reported_unavailable_when_the_model_is_off():
+    r = httpx.get(f"{UI}/api/answer", params={"q": K8S_QUERY, "limit": 8}, timeout=60)
+    assert r.status_code == 503 and r.json() == {"available": False}
+
+
+def test_search_still_works_right_after_an_unavailable_answer():
+    httpx.get(f"{UI}/api/answer", params={"q": K8S_QUERY, "limit": 8}, timeout=60)
+    assert K8S in keys(search(K8S_QUERY))
