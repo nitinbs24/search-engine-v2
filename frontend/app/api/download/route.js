@@ -22,6 +22,8 @@
 
 import { createHmac, createHash } from "crypto";
 
+import { dispositionType, encodeKey, isSafeKey } from "../../../lib/download.mjs";
+
 // ── AWS Sig V4 helpers ────────────────────────────────────────────────────────
 
 function hmacSHA256(key, data) {
@@ -37,8 +39,7 @@ function sha256hex(data) {
  * Returns a full URL string pointing to MINIO_ENDPOINT.
  */
 function presignS3GetUrl({ endpoint, accessKey, secretKey, region, bucket, key, expiresIn = 300 }) {
-  // Encode each path segment of the key separately so slashes are preserved
-  const encodedKey = key.split("/").map(encodeURIComponent).join("/");
+  const encodedKey = encodeKey(key);
   const url = new URL(`${endpoint}/${bucket}/${encodedKey}`);
   const host = url.host;
   const path = url.pathname;
@@ -110,6 +111,13 @@ export async function GET(request) {
     );
   }
 
+  if (!isSafeKey(key)) {
+    return new Response(
+      JSON.stringify({ error: "Invalid key" }),
+      { status: 400, headers: { "Content-Type": "application/json" } }
+    );
+  }
+
   // This route signs requests with the MinIO root credentials, so it serves one bucket only.
   if (bucket !== (process.env.MINIO_BUCKET || "uploads")) {
     return new Response(
@@ -145,13 +153,12 @@ export async function GET(request) {
 
     // "inline" lets the browser render the file (used by preview img/iframe)
     // "attachment" forces a Save As dialog (used by the download button)
-    const disposition = forceDownload
-      ? `attachment; filename="${encodeURIComponent(fileName)}"`
-      : `inline; filename="${encodeURIComponent(fileName)}"`;
+    const disposition = `${dispositionType(contentType, forceDownload)}; filename="${encodeURIComponent(fileName)}"`;
 
     const responseHeaders = {
       "Content-Type": contentType,
       "Content-Disposition": disposition,
+      "X-Content-Type-Options": "nosniff",
       // Cache for 5 minutes in the browser (reduces repeated fetches for preview)
       "Cache-Control": "private, max-age=300",
     };
