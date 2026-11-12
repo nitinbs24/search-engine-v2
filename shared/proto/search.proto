@@ -1,0 +1,33 @@
+syntax = "proto3";
+
+package search;
+
+option go_package = "search-engine-v2/backend/proto";
+
+// The search worker turns a natural-language query into what the backend needs
+// to build the OpenSearch query. It never talks to OpenSearch itself.
+service SearchWorker {
+  rpc ParseQuery(ParseQueryRequest) returns (ParseQueryResponse);
+}
+
+message ParseQueryRequest {
+  string query = 1;
+}
+
+message ParseQueryResponse {
+  repeated string keywords = 1;   // for the BM25 leg
+  Filters filters = 2;
+  repeated float text_vector = 3; // for the kNN leg on text_embedding
+}
+
+// Unset fields (empty list, 0, "") mean "no restriction".
+message Filters {
+  // A file matches if it has any of these extensions or MIME prefixes.
+  repeated string extensions = 1;
+  repeated string mime_prefixes = 2;
+  int64 min_size_bytes = 3;
+  int64 max_size_bytes = 4;
+  // ISO-8601 with offset; uploaded_from <= uploaded_at < uploaded_to.
+  string uploaded_from = 5;
+  string uploaded_to = 6;
+}

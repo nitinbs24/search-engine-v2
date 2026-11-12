@@ -1,0 +1,6 @@
+grpcio==1.68.1
+grpcio-tools==1.68.1
+httpx==0.28.1
+tzdata==2024.2
+spacy==3.8.3
+en_core_web_sm @ https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl
