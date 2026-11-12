@@ -30,32 +30,33 @@ type Cutoffs struct{ Rerank, Image float64 }
 
 // candidates is how many distinct files are fetched for a request. Reranking only the top
 // `limit` could never promote a good document from just below the cut.
+// highlightTop is how many of the top-scoring passages the model server also splits into sentences
+// and scores (one extra cross-encoder batch of roughly 5 passages x a handful of sentences, against
+// the ~150 passages of the main call). The top result's winning passage is always among them.
+const highlightTop = 5
+
+// answerSources is how many of the top text results the answer is written from.
+const answerSources = 3
+
+func parseLimit(r *http.Request) int {
+	limit, err := strconv.Atoi(r.URL.Query().Get("limit"))
+	if err != nil {
+		limit = 10
+	}
+	return min(max(limit, 1), 50)
+}
+
 func candidates(limit int) int { return max(limit, min(limit*3, 50)) }
 
 // New returns the router. store may be nil. checks are the dependency pings behind GET /health.
 func New(worker pb.SearchWorkerClient, searcher Searcher, store *cache.Client, cut Cutoffs, checks map[string]func(context.Context) error) http.Handler {
 	mux := http.NewServeMux()
 
-	mux.HandleFunc("GET /search", func(w http.ResponseWriter, r *http.Request) {
-		query := strings.TrimSpace(r.URL.Query().Get("q"))
-		if query == "" {
-			writeJSON(w, http.StatusOK, map[string]any{"results": []search.Result{}})
-			return
-		}
-		limit, err := strconv.Atoi(r.URL.Query().Get("limit"))
-		if err != nil {
-			limit = 10
-		}
-		limit = min(max(limit, 1), 50)
-
-		ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
-		defer cancel()
-
+	// retrieve is the whole search pipeline; code is 0 on success, else the HTTP status to return.
+	retrieve := func(ctx context.Context, query string, limit int) (entry cache.Entry, code int, msg string) {
 		if hit, ok := store.Get(ctx, query, limit); ok {
-			writeJSON(w, http.StatusOK, response(hit.Results, hit.Keywords))
-			return
+			return hit, 0, ""
 		}
-
 		parsed, err := worker.ParseQuery(ctx, &pb.ParseQueryRequest{Query: query})
 		if err != nil {
 			log.Printf("search worker: %v", err)
@@ -63,8 +64,7 @@ func New(worker pb.SearchWorkerClient, searcher Searcher, store *cache.Client, c
 			if status.Code(err) == codes.InvalidArgument {
 				code = http.StatusBadRequest
 			}
-			writeJSON(w, code, map[string]string{"error": "could not process the query"})
-			return
+			return entry, code, "could not process the query"
 		}
 		text := strings.Join(parsed.Keywords, " ")
 		if text == "" {
@@ -73,15 +73,71 @@ func New(worker pb.SearchWorkerClient, searcher Searcher, store *cache.Client, c
 		results, err := searcher.Search(ctx, search.Params{Text: text, Vector: parsed.TextVector, ImageVector: parsed.ImageVector, Filters: parsed.Filters, Limit: candidates(limit)})
 		if err != nil {
 			log.Printf("opensearch: %v", err)
-			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "search failed"})
-			return
+			return entry, http.StatusBadGateway, "search failed"
 		}
 		// Filter words ("pdf", "larger than 5MB") are not part of what the user is looking for.
 		results, reranked := rank(ctx, worker, parsed.CleanQuery, results, cut, limit)
+		entry = cache.Entry{Results: results, Keywords: parsed.Keywords}
 		if reranked { // a fused-order fallback is a degraded answer: do not keep it
-			store.Set(ctx, query, limit, cache.Entry{Results: results, Keywords: parsed.Keywords})
+			store.Set(ctx, query, limit, entry)
 		}
-		writeJSON(w, http.StatusOK, response(results, parsed.Keywords))
+		return entry, 0, ""
+	}
+
+	mux.HandleFunc("GET /search", func(w http.ResponseWriter, r *http.Request) {
+		query := strings.TrimSpace(r.URL.Query().Get("q"))
+		if query == "" {
+			writeJSON(w, http.StatusOK, map[string]any{"results": []search.Result{}})
+			return
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+		defer cancel()
+		entry, code, msg := retrieve(ctx, query, parseLimit(r))
+		if code != 0 {
+			writeJSON(w, code, map[string]string{"error": msg})
+			return
+		}
+		writeJSON(w, http.StatusOK, response(entry.Results, entry.Keywords))
+	})
+
+	// The UI asks for this after /search has rendered, with the same q and limit, so retrieval is
+	// normally a cache hit; generation is slow and must never share a request with search.
+	mux.HandleFunc("GET /answer", func(w http.ResponseWriter, r *http.Request) {
+		query := strings.TrimSpace(r.URL.Query().Get("q"))
+		if query == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "q is required"})
+			return
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), 2*time.Minute)
+		defer cancel()
+		entry, code, msg := retrieve(ctx, query, parseLimit(r))
+		if code != 0 {
+			writeJSON(w, code, map[string]string{"error": msg})
+			return
+		}
+		var sources []*pb.Source
+		var names []string
+		for _, res := range entry.Results {
+			if len(sources) < answerSources && !strings.HasPrefix(res.ContentType, "image/") && res.Snippet != "" {
+				sources = append(sources, &pb.Source{Filename: res.ObjectName, Passage: res.Snippet})
+				names = append(names, res.ObjectName)
+			}
+		}
+		if len(sources) == 0 {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "no text results to answer from"})
+			return
+		}
+		resp, err := worker.Answer(ctx, &pb.AnswerRequest{Query: query, Sources: sources})
+		if status.Code(err) == codes.Unavailable { // the optional model is off: not an error
+			writeJSON(w, http.StatusServiceUnavailable, map[string]any{"available": false})
+			return
+		}
+		if err != nil {
+			log.Printf("answer: %v", err)
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "answer failed"})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"answer": resp.Answer, "sources": names})
 	})
 
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
@@ -138,7 +194,7 @@ func rank(ctx context.Context, worker pb.SearchWorkerClient, query string, resul
 }
 
 // rerank scores every passage of every result with the cross-encoder. A result takes the score
-// of its best passage, which also becomes its snippet; results under minScore are dropped and the
+// of its best passage, which also becomes its snippet (with that passage's highlight); results under minScore are dropped and the
 // rest ordered by score. On any failure it logs and returns the fused order (reranked=false).
 func rerank(ctx context.Context, worker pb.SearchWorkerClient, query string, results []search.Result, minScore float64) ([]search.Result, bool) {
 	if len(results) == 0 {
@@ -155,7 +211,7 @@ func rerank(ctx context.Context, worker pb.SearchWorkerClient, query string, res
 			passages, owner = append(passages, p), append(owner, i)
 		}
 	}
-	resp, err := worker.Rerank(ctx, &pb.RerankRequest{Query: query, Passages: passages})
+	resp, err := worker.Rerank(ctx, &pb.RerankRequest{Query: query, Passages: passages, HighlightTop: highlightTop})
 	if err == nil && len(resp.Scores) != len(passages) {
 		err = fmt.Errorf("got %d scores for %d passages", len(resp.Scores), len(passages))
 	}
@@ -163,11 +219,15 @@ func rerank(ctx context.Context, worker pb.SearchWorkerClient, query string, res
 		log.Printf("rerank: %v", err)
 		return results, false
 	}
+	highlights := resp.Highlights
+	if len(highlights) != len(passages) { // an old worker: no highlights, not a failure
+		highlights = make([]string, len(passages))
+	}
 	scored := make([]bool, len(results))
 	for i, score := range resp.Scores {
 		r := &results[owner[i]]
 		if s := float64(score); !scored[owner[i]] || s > r.Score {
-			r.Score, r.Snippet, scored[owner[i]] = s, passages[i], true
+			r.Score, r.Snippet, r.Highlight, scored[owner[i]] = s, passages[i], highlights[i], true
 		}
 	}
 	kept := make([]search.Result, 0, len(results))

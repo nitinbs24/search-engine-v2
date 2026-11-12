@@ -22,24 +22,44 @@ import (
 )
 
 type stubWorker struct {
-	calls       int
-	err         error
-	scores      []float32 // nil: zeros
-	rerankErr   error
-	rerankCalls int
-	passages    []string
-	rerankQuery string
+	calls        int
+	err          error
+	scores       []float32 // nil: zeros
+	rerankErr    error
+	rerankCalls  int
+	passages     []string
+	rerankQuery  string
+	highlights   []string // nil: none
+	highlightTop int32
+	answer       string
+	answerErr    error
+	answerReq    *pb.AnswerRequest
+	answerGate   chan struct{} // if set, Answer signals on it, then blocks until the request is cancelled
+}
+
+func (w *stubWorker) Answer(ctx context.Context, in *pb.AnswerRequest, _ ...grpc.CallOption) (*pb.AnswerResponse, error) {
+	w.answerReq = in
+	if w.answerGate != nil {
+		w.answerGate <- struct{}{}
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	if w.answerErr != nil {
+		return nil, w.answerErr
+	}
+	return &pb.AnswerResponse{Answer: w.answer}, nil
 }
 
 func (w *stubWorker) Rerank(ctx context.Context, in *pb.RerankRequest, _ ...grpc.CallOption) (*pb.RerankResponse, error) {
 	w.rerankCalls++
 	w.passages = in.Passages
 	w.rerankQuery = in.Query
+	w.highlightTop = in.HighlightTop
 	if w.rerankErr != nil {
 		return nil, w.rerankErr
 	}
 	if w.scores != nil {
-		return &pb.RerankResponse{Scores: w.scores}, nil
+		return &pb.RerankResponse{Scores: w.scores, Highlights: w.highlights}, nil
 	}
 	return &pb.RerankResponse{Scores: make([]float32, len(in.Passages))}, nil
 }
@@ -298,5 +318,113 @@ func TestRerankerGetsTheQueryWithoutFilterPhrases(t *testing.T) {
 	get(t, New(w, &stubSearcher{}, nil, Cutoffs{}, nil), "/search?q=pdfs+larger+than+5MB+about+kubernetes")
 	if w.rerankQuery != "about kubernetes" {
 		t.Fatalf("reranked against %q", w.rerankQuery)
+	}
+}
+
+func firstResult(body map[string]any) map[string]any {
+	return body["results"].([]any)[0].(map[string]any)
+}
+
+func TestTheWinningPassagesHighlightIsReturnedAndCached(t *testing.T) {
+	c := cache.New(miniredis.RunT(t).Addr(), time.Minute)
+	s := &stubSearcher{results: []search.Result{{ObjectKey: "a", Snippet: "weak. x", Passages: []string{"weak. x", "strong. Best one."}}}}
+	w := &stubWorker{scores: []float32{1, 4}, highlights: []string{"x", "Best one."}}
+	h := New(w, s, c, Cutoffs{}, nil)
+	_, first := get(t, h, "/search?q=x")
+	_, second := get(t, h, "/search?q=x")
+	if firstResult(first)["highlight"] != "Best one." || firstResult(second)["highlight"] != "Best one." || w.highlightTop != highlightTop {
+		t.Fatalf("got %v / %v, highlight_top %d", first, second, w.highlightTop)
+	}
+}
+
+func TestImagesAndMismatchedHighlightsHaveNone(t *testing.T) {
+	s := &stubSearcher{results: []search.Result{{ObjectKey: "t", ContentType: "text/plain", Snippet: "a. b"}, {ObjectKey: "i", ContentType: "image/png", Score: 0.5}}}
+	w := &stubWorker{scores: []float32{1}, highlights: []string{"too", "many"}}
+	_, body := get(t, New(w, s, nil, Cutoffs{}, nil), "/search?q=x")
+	for _, r := range body["results"].([]any) {
+		if _, ok := r.(map[string]any)["highlight"]; ok {
+			t.Fatalf("unexpected highlight: %v", body)
+		}
+	}
+}
+
+var textHits = []search.Result{
+	{ObjectKey: "k/a.pdf", ObjectName: "a.pdf", ContentType: "application/pdf", Snippet: "pa"},
+	{ObjectKey: "k/i.png", ObjectName: "i.png", ContentType: "image/png", Score: 0.9},
+	{ObjectKey: "k/b.txt", ObjectName: "b.txt", ContentType: "text/plain", Snippet: "pb"},
+}
+
+func TestAnswerUsesTheTopTextPassagesAndNamesTheirFiles(t *testing.T) {
+	w := &stubWorker{answer: "It is so [a.pdf]", scores: []float32{2, 1}}
+	code, body := get(t, New(w, &stubSearcher{results: textHits}, nil, Cutoffs{}, nil), "/answer?q=why")
+	if code != 200 || body["answer"] != "It is so [a.pdf]" || !reflect.DeepEqual(body["sources"], []any{"a.pdf", "b.txt"}) {
+		t.Fatalf("got %d %v", code, body)
+	}
+	if w.answerReq.Query != "why" || len(w.answerReq.Sources) != 2 || w.answerReq.Sources[0].Passage != "pa" {
+		t.Fatalf("asked %v", w.answerReq)
+	}
+}
+
+func TestAnswerReusesTheCachedSearch(t *testing.T) {
+	c := cache.New(miniredis.RunT(t).Addr(), time.Minute)
+	s := &stubSearcher{results: textHits}
+	h := New(&stubWorker{answer: "ok", scores: []float32{2, 1}}, s, c, Cutoffs{}, nil)
+	get(t, h, "/search?q=why&limit=8")
+	get(t, h, "/answer?q=why&limit=8")
+	if s.calls != 1 {
+		t.Fatalf("retrieval ran %d times", s.calls)
+	}
+}
+
+func TestAnswerIsRecognisablyUnavailableWhenTheModelIsOff(t *testing.T) {
+	w := &stubWorker{answerErr: status.Error(codes.Unavailable, "off"), scores: []float32{2, 1}}
+	code, body := get(t, New(w, &stubSearcher{results: textHits}, nil, Cutoffs{}, nil), "/answer?q=why")
+	if code != http.StatusServiceUnavailable || body["available"] != false {
+		t.Fatalf("got %d %v", code, body)
+	}
+}
+
+func TestAnswerWithNothingToAnswerFromOrNoQuery(t *testing.T) {
+	h := New(&stubWorker{}, &stubSearcher{results: []search.Result{{ObjectKey: "i", ContentType: "image/png", Score: 0.5}}}, nil, Cutoffs{}, nil)
+	if code, _ := get(t, h, "/answer?q=why"); code != http.StatusNotFound {
+		t.Fatalf("got %d", code)
+	}
+	if code, _ := get(t, h, "/answer?q="); code != http.StatusBadRequest {
+		t.Fatalf("got %d", code)
+	}
+}
+
+func TestSearchIsNotDelayedBySlowAnswer(t *testing.T) {
+	w := &stubWorker{answerGate: make(chan struct{}), scores: []float32{2, 1}}
+	h := New(w, &stubSearcher{results: textHits}, nil, Cutoffs{}, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("GET", "/answer?q=why", nil).WithContext(ctx))
+	}()
+	<-w.answerGate // the answer request is now stuck in generation
+	finished := make(chan int)
+	go func() { code, _ := get(t, h, "/search?q=why"); finished <- code }()
+	select {
+	case code := <-finished:
+		if code != 200 {
+			t.Fatalf("got %d", code)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("search waited for the answer")
+	}
+	cancel()
+	<-done
+}
+
+func TestAnswerFailureIs502AndSearchStillWorks(t *testing.T) {
+	w := &stubWorker{answerErr: status.Error(codes.Internal, "boom"), scores: []float32{2, 1}}
+	h := New(w, &stubSearcher{results: textHits}, nil, Cutoffs{}, nil)
+	if code, _ := get(t, h, "/answer?q=why"); code != http.StatusBadGateway {
+		t.Fatalf("got %d", code)
+	}
+	if code, _ := get(t, h, "/search?q=why"); code != 200 {
+		t.Fatalf("got %d", code)
 	}
 }

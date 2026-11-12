@@ -32,16 +32,18 @@ type Params struct {
 }
 
 type Result struct {
-	ID           string  `json:"id"`
-	Bucket       string  `json:"bucket"`
-	ObjectKey    string  `json:"object_key"`
-	ObjectName   string  `json:"object_name"`
-	Extension    string  `json:"extension"`
-	ContentType  string  `json:"content_type"`
-	SizeBytes    int64   `json:"size_bytes"`
-	LastModified string  `json:"last_modified"`
-	Snippet      string  `json:"snippet"`
-	Score        float64 `json:"score"`
+	ID           string `json:"id"`
+	Bucket       string `json:"bucket"`
+	ObjectKey    string `json:"object_key"`
+	ObjectName   string `json:"object_name"`
+	Extension    string `json:"extension"`
+	ContentType  string `json:"content_type"`
+	SizeBytes    int64  `json:"size_bytes"`
+	LastModified string `json:"last_modified"`
+	Snippet      string `json:"snippet"`
+	// Highlight is the sentence of Snippet that best matches the query; empty when none was picked.
+	Highlight string  `json:"highlight,omitempty"`
+	Score     float64 `json:"score"`
 	// Passages are the file's best chunks by fused rank (the first is Snippet), for the reranker.
 	Passages []string `json:"-"`
 }
