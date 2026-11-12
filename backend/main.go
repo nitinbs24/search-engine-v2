@@ -25,6 +25,19 @@ func mustEnv(key string) string {
 	return v
 }
 
+// workerReady waits, within the caller's deadline, for the connection to be usable.
+func workerReady(conn *grpc.ClientConn) func(context.Context) error {
+	return func(ctx context.Context) error {
+		conn.Connect() // a lazy connection stays idle until first use
+		for s := conn.GetState(); s != connectivity.Ready; s = conn.GetState() {
+			if !conn.WaitForStateChange(ctx, s) {
+				return fmt.Errorf("connection %s", s)
+			}
+		}
+		return nil
+	}
+}
+
 func main() {
 	conn, err := grpc.NewClient(mustEnv("SEARCH_WORKER_ADDR"), grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
@@ -37,14 +50,8 @@ func main() {
 		HTTP: &http.Client{Timeout: 30 * time.Second},
 	}
 	checks := map[string]func(context.Context) error{
-		"opensearch": opensearch.Ping,
-		"search_worker": func(context.Context) error {
-			conn.Connect() // a lazy connection stays idle until first use
-			if s := conn.GetState(); s == connectivity.TransientFailure || s == connectivity.Shutdown {
-				return fmt.Errorf("connection %s", s)
-			}
-			return nil
-		},
+		"opensearch":    opensearch.Ping,
+		"search_worker": workerReady(conn),
 	}
 
 	log.Print("backend listening on :8080")
