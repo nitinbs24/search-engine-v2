@@ -8,3 +8,4 @@ grpcio-tools==1.68.1
 tzdata==2024.2
 Pillow==11.0.0
 minio==7.2.12
+opensearch-py==2.8.0
