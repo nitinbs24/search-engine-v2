@@ -12,6 +12,8 @@ from datetime import datetime, timedelta
 class NLPQueryParser:
     """Parses natural language queries to extract filters, intent text, and keywords."""
 
+    MONTH = r"(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)"
+
     # Date patterns  (regex → canonical filter key)
     DATE_PATTERNS = [
         (r"\blast\s+week\b",  "last_week"),
@@ -19,8 +21,8 @@ class NLPQueryParser:
         (r"\blast\s+year\b",  "last_year"),
         (r"\byesterday\b",    "yesterday"),
         (r"\btoday\b",        "today"),
-        (r"\bfrom\s+(\w+)\b", "from_month"),
-        (r"\bin\s+(\w+)\b",   "in_month"),
+        (r"\bfrom\s+" + MONTH + r"\b", "from_month"),
+        (r"\bin\s+" + MONTH + r"\b",   "in_month"),
     ]
 
     # Size patterns
@@ -46,7 +48,6 @@ class NLPQueryParser:
     TYPE_PATTERNS = [
         (r"\b(images?|pictures?|photos?)\b",               "image"),
         (r"\b(videos?|movies?)\b",                         "video"),
-        (r"\b(documents?|docs?|word\s+files?)\b",          "document"),
         (r"\b(audio|music|songs?)\b",                      "audio"),
         (r"\b(archives?|compressed)\b",                    "archive"),
         (r"\b(powerpoints?|slides?|presentations?)\b",     "presentation"),
@@ -161,8 +162,7 @@ class NLPQueryParser:
                 seen.add(kw)
                 unique_keywords.append(kw)
 
-        intent_text = " ".join(unique_keywords)
-        return intent_text, unique_keywords, filters
+        return self._strip_filter_text(query), unique_keywords, filters
 
     # ------------------------------------------------------------------
     # Regex filter extraction  (shared by both spaCy and rule-based paths)
@@ -207,10 +207,6 @@ class NLPQueryParser:
         for match in re.finditer(ext_pattern, query, re.IGNORECASE):
             filters.append(f"extension:{match.group(1).lower()}")
             
-        # Catch-all for extensions with dot (e.g. ".pdf")
-        for match in re.finditer(r"\.(\w+)\b", query):
-            filters.append(f"extension:{match.group(1).lower()}")
-            
         return list(set(filters))
 
     def _strip_filter_text(self, query: str) -> str:
@@ -226,11 +222,8 @@ class NLPQueryParser:
             text = re.sub(pattern, " ", text, flags=re.IGNORECASE)
             
         # Strip known extensions and plurals
-        ext_pattern = r"\b(" + "|".join(self.KNOWN_EXTENSIONS) + r")s?\b"
+        ext_pattern = r"\.?\b(" + "|".join(self.KNOWN_EXTENSIONS) + r")s?\b"
         text = re.sub(ext_pattern, " ", text, flags=re.IGNORECASE)
-        
-        # Strip dot extensions
-        text = re.sub(r"\.\w+\b", " ", text, flags=re.IGNORECASE)
         
         return re.sub(r"\s+", " ", text).strip()
 
@@ -250,9 +243,8 @@ class NLPQueryParser:
         filters.extend(self._extract_date_filters(query_lower))
         filters.extend(self._extract_size_filters(query_lower))
         filters.extend(self._extract_type_filters(query_lower))
-        intent_text = self._extract_intent_text_regex(query_lower)
-        keywords = [w for w in intent_text.split() if len(w) > 2]
-        return intent_text, keywords, filters
+        keywords = [w for w in self._extract_intent_text_regex(query_lower).split() if len(w) > 2]
+        return self._strip_filter_text(query), keywords, filters
 
     def _extract_intent_text_regex(self, query: str) -> str:
         text = self._strip_filter_text(query)

@@ -22,11 +22,20 @@ class SearchWorker(search_pb2_grpc.SearchWorkerServicer):
         if not query:
             context.abort(grpc.StatusCode.INVALID_ARGUMENT, "query is empty")
         intent, keywords, filter_strings = self.parser.parse(query)
+        clean = intent or query
+        vectors = self.model.embed_query(clean)
         return search_pb2.ParseQueryResponse(
+            clean_query=clean,
             keywords=keywords,
             filters=filters.resolve(filter_strings, datetime.now(timezone.utc), self.tz),
-            text_vector=self.model.embed_query(intent or query),
+            text_vector=vectors["text_vector"],
+            image_vector=vectors["image_vector"],
         )
+
+    def Rerank(self, request, context):
+        if not request.query.strip() or not request.passages:
+            context.abort(grpc.StatusCode.INVALID_ARGUMENT, "query and passages are required")
+        return search_pb2.RerankResponse(scores=self.model.rerank(request.query, list(request.passages)))
 
 
 if __name__ == "__main__":

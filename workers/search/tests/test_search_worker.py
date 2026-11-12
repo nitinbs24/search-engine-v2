@@ -2,12 +2,14 @@ from concurrent import futures
 from datetime import datetime, timedelta, timezone
 
 import grpc
+import httpx
 import pytest
 import search_pb2
 import search_pb2_grpc
 
 import filters
 from main import SearchWorker
+from model_client import ModelClient
 
 NOW = datetime(2026, 11, 12, 9, 0, tzinfo=timezone.utc)
 MB = 1024 ** 2
@@ -55,7 +57,11 @@ class FakeModel:
 
     def embed_query(self, text):
         self.seen.append(text)
-        return [0.25, 0.75]
+        return {"text_vector": [0.25, 0.75], "image_vector": [0.5, 0.5, 0.0]}
+
+    def rerank(self, query, passages):
+        self.seen.append((query, passages))
+        return [float(len(p)) for p in passages]
 
 
 @pytest.fixture
@@ -77,10 +83,31 @@ def test_parse_query_round_trip_over_grpc(stub):
     assert "kubernetes" in r.keywords
     assert list(r.filters.extensions) == ["pdf"] and r.filters.min_size_bytes == 5 * MB
     assert list(r.text_vector) == [0.25, 0.75]
+    assert list(r.image_vector) == [0.5, 0.5, 0.0]
     assert "kubernetes" in stub.model.seen[0]
+    assert r.clean_query == stub.model.seen[0] and "5MB" not in r.clean_query
 
 
 def test_blank_query_is_rejected(stub):
     with pytest.raises(grpc.RpcError) as e:
         stub.ParseQuery(search_pb2.ParseQueryRequest(query="   "))
     assert e.value.code() == grpc.StatusCode.INVALID_ARGUMENT
+
+
+def test_rerank_round_trip_over_grpc(stub):
+    r = stub.Rerank(search_pb2.RerankRequest(query="kubernetes", passages=["a", "bbb", ""]))
+    assert list(r.scores) == [1.0, 3.0, 0.0]
+    assert stub.model.seen[0] == ("kubernetes", ["a", "bbb", ""])
+
+
+@pytest.mark.parametrize("req", [search_pb2.RerankRequest(query="  ", passages=["a"]), search_pb2.RerankRequest(query="q")])
+def test_rerank_rejects_blank_query_and_no_passages(stub, req):
+    with pytest.raises(grpc.RpcError) as e:
+        stub.Rerank(req)
+    assert e.value.code() == grpc.StatusCode.INVALID_ARGUMENT
+
+
+def test_model_client_returns_both_query_vectors():
+    body = {"text_vector": [1.0], "image_vector": [2.0, 3.0]}
+    client = ModelClient("http://x", transport=httpx.MockTransport(lambda r: httpx.Response(200, json=body)))
+    assert client.embed_query("cats") == body

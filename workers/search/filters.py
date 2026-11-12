@@ -5,14 +5,14 @@ from zoneinfo import ZoneInfo
 import search_pb2
 
 UNITS = {"KB": 1024, "MB": 1024 ** 2, "GB": 1024 ** 3, "TB": 1024 ** 4}
-RELATIVE_DAYS = {"last_week": 7, "last_month": 30, "last_year": 365, "yesterday": 1, "today": 1}
+RELATIVE_DAYS = {"last_week": 7, "last_month": 30, "last_year": 365}
+CALENDAR_DAYS_AGO = {"today": 0, "yesterday": 1}
 MONTHS = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"]
 # type -> (extensions, MIME prefixes)
 TYPES = {
     "image": ([], ["image/"]),
     "video": ([], ["video/"]),
     "audio": ([], ["audio/"]),
-    "document": ([], ["application/"]),
     "presentation": (["ppt", "pptx"], ["application/vnd.ms-powerpoint"]),
     "spreadsheet": (["xls", "xlsx", "csv"], ["application/vnd.ms-excel"]),
 }
@@ -38,6 +38,11 @@ def resolve(strings: list[str], now: datetime, tz: str) -> search_pb2.Filters:
         elif kind == "date" and value in RELATIVE_DAYS:
             f.uploaded_from = (now - timedelta(days=RELATIVE_DAYS[value])).isoformat()
             f.uploaded_to = now.isoformat()
+        elif kind == "date" and value in CALENDAR_DAYS_AGO:
+            midnight = now.astimezone(ZoneInfo(tz)).replace(hour=0, minute=0, second=0, microsecond=0)
+            start = midnight - timedelta(days=CALENDAR_DAYS_AGO[value])
+            f.uploaded_from = start.isoformat()
+            f.uploaded_to = (start + timedelta(days=1)).isoformat()
         elif kind == "exact_date":
             month, day, year = value.split("_")
             try:
