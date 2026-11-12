@@ -15,33 +15,33 @@ Report bug IDs (S1, I5, …) refer to `docs/ANALYSIS_REPORT.md`.
 
 ## Phase 1 — Walking skeleton (text)
 
-- [ ] **T3 Model server: text** (M) — deps: T1
+- [x] **T3 Model server: text** (M) — deps: T1
   - Accept: `/embed/text` returns one vector per input with the dimension in `model_spec.json`; `/embed/query` returns `text_vector`; `/health` reports loaded models and device; empty input → 422, not a zero vector (S12).
   - Verify: `pytest workers/model-server`; `curl /health`.
   - Files: `workers/model-server/{main,server,text_embedder}.py`, `model_spec.json`, `requirements.txt`, `Dockerfile`, tests.
-- [ ] **T4 Index mapping + init** (S) — deps: T2, T3
+- [x] **T4 Index mapping + init** (S) — deps: T2, T3
   - Accept: mapping generated from `model_spec.json`; engine `lucene`; 1 shard, 0 replicas; init is idempotent.
   - Verify: test asserts mapping dimension equals spec; cluster health green after init.
   - Files: `infrastructure/opensearch/{index-mapping.json or template, hybrid-plugin-setup.sh}`.
-- [ ] **T5 Ingestion: text path** (M) — deps: T3, T4
+- [x] **T5 Ingestion: text path** (M) — deps: T3, T4
   - Accept: `.txt`/`.pdf` upload → chunks indexed with `text_embedding`; `uploaded_at` = event time; no torch/transformers in `requirements.txt`.
   - Verify: `pytest workers/ingestion` (mocked model server + OpenSearch); manual upload shows chunk count in the index.
   - Files: `workers/ingestion/{main,model_client,tika_extractor,chunker,opensearch_client}.py`.
-- [ ] **T6 Proto + search worker ParseQuery** (M) — deps: T3
+- [x] **T6 Proto + search worker ParseQuery** (M) — deps: T3
   - Accept: one `search.proto` in `shared/proto/`; stubs generated at build for Python and Go; `ParseQuery` returns keywords, filters, `text_vector`.
   - Verify: `pytest workers/search` incl. an in-process gRPC round trip.
   - Files: `shared/proto/search.proto`, `workers/search/{main,nlp_parser,model_client}.py`, Dockerfile.
-- [ ] **T7 Go backend: /search** (M) — deps: T4, T6
+- [x] **T7 Go backend: /search** (M) — deps: T4, T6
   - Accept: hybrid query with BM25 + text kNN, **identical filter on both legs** (S1); `/health` pings dependencies only; limit clamped 1–50.
   - Verify: `go test ./...` (run in a `golang` container) with golden-JSON tests for the query builder; `curl /search?q=…` returns the T5 document.
   - Files: `backend/{main.go, api/routes.go, search/opensearch.go, grpc/client.go, config/config.go}`.
-- [ ] **T8 Frontend moved** (M) — deps: T7
+- [x] **T8 Frontend moved** (M) — deps: T7
   - Accept: current UI renders results from the Go backend; one Next config; lockfile committed; download/preview works for keys containing `/`; unused parser code removed; Next.js patched to latest 14.2.x.
   - Verify: `npm run build`; `make smoke` (upload → search via `/api/search` → download bytes match).
   - Files: `frontend/app/**`, `frontend/lib/api.js`, `frontend/Dockerfile`, `scripts/smoke.sh`.
 
 ### Checkpoint A
-- [ ] `make up && make smoke` green · all unit tests green
+- [x] `make up && make smoke` green · all unit tests green
 - [ ] Owner review
 - [ ] `/coderabbit:code-review`
 
