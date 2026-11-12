@@ -3,7 +3,7 @@ COMPOSE = docker compose --env-file .env -f infrastructure/docker-compose.yml
 # Each directory is its own pytest run: module names repeat across workers.
 PY_TESTS = workers/model-server workers/ingestion workers/search infrastructure/opensearch
 
-.PHONY: help up down test smoke
+.PHONY: help up down test smoke integration eval
 
 help: ## List targets
 	@grep -E '^[a-z]+:.*##' $(MAKEFILE_LIST) | sed 's/:.*## /\t/'
@@ -28,3 +28,11 @@ test: ## Run all unit tests
 
 smoke: ## Upload a file and find it through the API
 	bash scripts/smoke.sh
+
+integration: ## Run the end-to-end cases against the running stack
+	docker run --rm --network host --env-file .env -v "$(CURDIR)":/src -v se2-pip-cache:/root/.cache/pip -w /src python:3.11-slim sh -c '\
+		pip install -q --root-user-action=ignore -r requirements-dev.txt && \
+		python -m pytest -q -p no:cacheprovider tests/integration'
+
+eval: ## Upload the evaluation corpus, print recall@5 and MRR, remove the corpus
+	python3 eval/run.py
