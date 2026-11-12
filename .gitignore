@@ -16,3 +16,5 @@ workers/search/proto_gen/
 backend/proto/
 # graphify knowledge-graph outputs (regenerate with /graphify)
 graphify-out/
+# eval corpus and evaluation harness (local only)
+eval/
