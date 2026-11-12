@@ -2,6 +2,8 @@
 
 import { useState, useRef, useEffect, useCallback } from "react";
 
+import { splitHighlight } from "../lib/highlight.mjs";
+
 const API_BASE = "";
 
 // ── Clipboard helper (works on HTTP too) ───────────────────────────────────
@@ -148,14 +150,16 @@ function ChevronIcon({ open }) {
   );
 }
 
-/* ── AI Summary Panel ── */
-function SummaryPanel({ results, query, intentText }) {
+/* ── Top-result panel: the best-matching passage, plus an optional generated answer ── */
+function SummaryPanel({ results, query, intentText, answer }) {
   const [open, setOpen] = useState(true);
 
   if (!results || results.length === 0) return null;
 
   const top = results[0];
   const fileName = top.object_name?.split("/").pop() || top.object_name || "—";
+
+  const parts = splitHighlight(top.snippet, top.highlight);
 
   const typeCounts = results.reduce((acc, r) => {
     const ext = (r.extension || "unknown").toLowerCase();
@@ -172,7 +176,7 @@ function SummaryPanel({ results, query, intentText }) {
             <line x1="12" y1="8" x2="12" y2="12" />
             <line x1="12" y1="16" x2="12.01" y2="16" />
           </svg>
-          AI Summary
+          Top Result
         </span>
         <span className="summary-chevron"><ChevronIcon open={open} /></span>
       </button>
@@ -180,11 +184,22 @@ function SummaryPanel({ results, query, intentText }) {
       {open && (
         <div className="summary-body">
 
-          {/* AI-generated summary card */}
+          {/* Generated answer: only rendered once the optional model has produced one */}
+          {answer && (
+            <div className="summary-card">
+              <div className="summary-card-label">Answer</div>
+              <p className="summary-card-text">{answer.answer}</p>
+              <p className="summary-card-text">Sources: {answer.sources.join(", ")}</p>
+            </div>
+          )}
+
+          {/* Extracted passage, not generated: the matching sentence is marked as plain text */}
           {top.snippet && (
             <div className="summary-card">
-              <div className="summary-card-label">Document Summary</div>
-              <p className="summary-card-text">{top.snippet}</p>
+              <div className="summary-card-label">Best matching passage</div>
+              <p className="summary-card-text">
+                {parts ? <>{parts.before}<mark className="summary-mark">{parts.match}</mark>{parts.after}</> : top.snippet}
+              </p>
             </div>
           )}
 
@@ -502,15 +517,28 @@ export default function Home() {
       const res = await fetch(`${baseUrl}?q=${encodeURIComponent(trimmed)}&limit=8`);
       if (!res.ok) throw new Error("Search service unavailable");
       const data = await res.json();
-      setMessages((prev) => [
-        ...prev,
-        {
-          role: "assistant",
-          results: data.results || [],
-          query: trimmed,
-          intentText: data.intent_text || "",
-        },
-      ]);
+      const reply = {
+        role: "assistant",
+        results: data.results || [],
+        query: trimmed,
+        intentText: data.intent_text || "",
+        id: crypto.randomUUID(),
+        rev: 0, // bumped when a live refresh replaces the results
+      };
+      setMessages((prev) => [...prev, reply]);
+      // Optional and slow: requested only after the results are on screen; any failure just means no panel.
+      if (reply.results.length > 0) {
+        const answerUrl = API_BASE ? `${API_BASE}/answer` : "/api/answer";
+        fetch(`${answerUrl}?q=${encodeURIComponent(trimmed)}&limit=8`)
+          .then((r) => (r.ok ? r.json() : null))
+          .then((a) => {
+            // Attach only to the results the answer was generated from.
+            if (a?.answer) {
+              setMessages((prev) => prev.map((m) => (m.id === reply.id && m.rev === reply.rev ? { ...m, answer: a } : m)));
+            }
+          })
+          .catch(() => {});
+      }
     } catch (err) {
       setMessages((prev) => [
         ...prev,
@@ -584,7 +612,7 @@ export default function Home() {
     setMessages((prev) =>
       prev.map((m, i) =>
         i === prev.lastIndexOf(latestAssistant)
-          ? { ...m, results: pendingUpdate.results, intentText: pendingUpdate.intent_text }
+          ? { ...m, results: pendingUpdate.results, intentText: pendingUpdate.intent_text, rev: m.rev + 1, answer: undefined }
           : m
       )
     );
@@ -725,6 +753,7 @@ export default function Home() {
                         results={msg.results}
                         query={msg.query}
                         intentText={msg.intentText}
+                        answer={msg.answer}
                       />
                     </aside>
                   )}

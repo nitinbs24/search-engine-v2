@@ -1224,6 +1224,13 @@ body {
   margin: 0;
 }
 
+.summary-mark {
+  background: rgba(255, 213, 79, 0.45);
+  color: inherit;
+  border-radius: 3px;
+  padding: 0 2px;
+}
+
 /* File row */
 .summary-file-row {
   display: flex;
