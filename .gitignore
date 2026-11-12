@@ -1,0 +1,16 @@
+.env
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+node_modules/
+.next/
+.vscode/
+.idea/
+.hf_cache/
+models/
+docker-compose.override.yml
+# generated at image build from shared/proto
+workers/search/proto_gen/
+backend/proto/
