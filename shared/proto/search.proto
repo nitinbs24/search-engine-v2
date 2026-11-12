@@ -10,6 +10,9 @@ service SearchWorker {
   rpc ParseQuery(ParseQueryRequest) returns (ParseQueryResponse);
   // One relevance score per passage, in input order; higher is more relevant.
   rpc Rerank(RerankRequest) returns (RerankResponse);
+  // A short answer, citing filenames, written from the given passages. UNAVAILABLE when the
+  // answer model is not running (it is optional).
+  rpc Answer(AnswerRequest) returns (AnswerResponse);
 }
 
 message ParseQueryRequest {
@@ -27,10 +30,26 @@ message ParseQueryResponse {
 message RerankRequest {
   string query = 1;
   repeated string passages = 2;
+  int32 highlight_top = 3; // also pick the best sentence of this many top-scoring passages
 }
 
 message RerankResponse {
   repeated float scores = 1;
+  repeated string highlights = 2; // per passage: its best sentence, "" where none was picked
+}
+
+message AnswerRequest {
+  string query = 1;
+  repeated Source sources = 2;
+}
+
+message Source {
+  string filename = 1;
+  string passage = 2;
+}
+
+message AnswerResponse {
+  string answer = 1;
 }
 
 // Unset fields (empty list, 0, "") mean "no restriction".
