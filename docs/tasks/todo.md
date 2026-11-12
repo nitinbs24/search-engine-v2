@@ -80,28 +80,28 @@ Report bug IDs (S1, I5, …) refer to `docs/ANALYSIS_REPORT.md`.
 
 ## Phase 4 — Ingestion reliability
 
-- [ ] **T15 No silent drops** (S) — Accept: oversized → DLQ with reason (I1); no-text files indexed by filename/metadata (I9). Verify: unit tests for both paths.
-- [ ] **T16 Ordered processing** (M) — Accept: an offset is committed only when every earlier offset on that partition is done (I2); download streamed, not blocking the loop (I6). Verify: test that kills processing mid-batch and asserts redelivery.
-- [ ] **T17 Correct re-index and failure handling** (S) — Accept: re-upload with fewer chunks leaves no stale chunks (I3); any bulk item failure fails the message (I4); 4xx not retried (I7). Verify: unit tests against a fake OpenSearch.
-- [ ] **T18 DLQ retry worker** (M) — Accept: retry count in a Kafka header; a message is retried at most N times in total; no self-consumption; no sleep longer than the poll interval (I5); service present in Compose. Verify: unit test simulating three consecutive failures ends in exactly one permanent-failure record.
+- [x] **T15 No silent drops** (S) — Accept: oversized → DLQ with reason (I1); no-text files indexed by filename/metadata (I9). Verify: unit tests for both paths.
+- [x] **T16 Ordered processing** (M) — Accept: an offset is committed only when every earlier offset on that partition is done (I2); download streamed, not blocking the loop (I6). Verify: test that kills processing mid-batch and asserts redelivery.
+- [x] **T17 Correct re-index and failure handling** (S) — Accept: re-upload with fewer chunks leaves no stale chunks (I3); any bulk item failure fails the message (I4); 4xx not retried (I7). Verify: unit tests against a fake OpenSearch.
+- [x] **T18 DLQ retry worker** (M) — Accept: retry count in a Kafka header; a message is retried at most N times in total; no self-consumption; no sleep longer than the poll interval (I5); service present in Compose. Verify: unit test simulating three consecutive failures ends in exactly one permanent-failure record.
 
 ### Checkpoint D
-- [ ] Fault-injection checks pass (worker killed mid-file; shorter re-upload; Tika down)
+- [x] Fault-injection checks pass (worker killed mid-file; shorter re-upload; Tika down) — run by hand 2026-11-12, plus a broken image ending as exactly one permanent-failure record
 - [ ] Owner review
 
 ## Phase 5 — Summary panel
 
-- [ ] **T19 Extracted passage** (M) — deps: T11
+- [x] **T19 Extracted passage** (M) — deps: T11
   - Accept: top results carry the best-matching sentences; UI shows them highlighted; Flan-T5 is gone.
   - Verify: `pytest` for sentence selection; visual check in the UI.
-- [ ] **T20 Generated answer (optional)** (M) — deps: T19
+- [x] **T20 Generated answer (optional)** (M) — deps: T19
   - Accept: answer model loads only when enabled and CUDA is visible; `/answer` cites source filenames; UI requests it after results and hides the panel when unavailable; results are never delayed by it.
   - Verify: tests with the feature on (stubbed model) and off; manual check on GPU.
 
 ### Checkpoint E
-- [ ] Works with answer model on and off
+- [ ] Works with answer model on and off — off is verified live; on is covered only by unit tests with a stand-in model, because the image is CPU-only until T22
 - [ ] Owner review
-- [ ] `/coderabbit:code-review`
+- [x] `/coderabbit:code-review` — 5 findings; 4 fixed (re-index order, item-level 429 retry, answer/refresh race, answer model load failure), 1 minor left (source validation in the Answer RPC)
 
 ## Phase 6 — minikube
 

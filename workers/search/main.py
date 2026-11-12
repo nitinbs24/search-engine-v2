@@ -35,7 +35,16 @@ class SearchWorker(search_pb2_grpc.SearchWorkerServicer):
     def Rerank(self, request, context):
         if not request.query.strip() or not request.passages:
             context.abort(grpc.StatusCode.INVALID_ARGUMENT, "query and passages are required")
-        return search_pb2.RerankResponse(scores=self.model.rerank(request.query, list(request.passages)))
+        r = self.model.rerank(request.query, list(request.passages), request.highlight_top)
+        return search_pb2.RerankResponse(scores=r["scores"], highlights=r["highlights"])
+
+    def Answer(self, request, context):
+        if not request.query.strip() or not request.sources:
+            context.abort(grpc.StatusCode.INVALID_ARGUMENT, "query and sources are required")
+        text = self.model.answer(request.query, [{"filename": s.filename, "passage": s.passage} for s in request.sources])
+        if text is None:
+            context.abort(grpc.StatusCode.UNAVAILABLE, "answer model is not available")
+        return search_pb2.AnswerResponse(answer=text)
 
 
 if __name__ == "__main__":

@@ -59,9 +59,15 @@ class FakeModel:
         self.seen.append(text)
         return {"text_vector": [0.25, 0.75], "image_vector": [0.5, 0.5, 0.0]}
 
-    def rerank(self, query, passages):
-        self.seen.append((query, passages))
-        return [float(len(p)) for p in passages]
+    def rerank(self, query, passages, highlight_top):
+        self.seen.append((query, passages, highlight_top))
+        return {"scores": [float(len(p)) for p in passages], "highlights": [p[:1] for p in passages]}
+
+    answer_text = "yes [a.pdf]"  # None: the model server has no answer model
+
+    def answer(self, question, sources):
+        self.seen.append((question, sources))
+        return self.answer_text
 
 
 @pytest.fixture
@@ -95,9 +101,29 @@ def test_blank_query_is_rejected(stub):
 
 
 def test_rerank_round_trip_over_grpc(stub):
-    r = stub.Rerank(search_pb2.RerankRequest(query="kubernetes", passages=["a", "bbb", ""]))
-    assert list(r.scores) == [1.0, 3.0, 0.0]
-    assert stub.model.seen[0] == ("kubernetes", ["a", "bbb", ""])
+    r = stub.Rerank(search_pb2.RerankRequest(query="kubernetes", passages=["a", "bbb", ""], highlight_top=2))
+    assert list(r.scores) == [1.0, 3.0, 0.0] and list(r.highlights) == ["a", "b", ""]
+    assert stub.model.seen[0] == ("kubernetes", ["a", "bbb", ""], 2)
+
+
+def test_answer_round_trip_over_grpc(stub):
+    r = stub.Answer(search_pb2.AnswerRequest(query="why?", sources=[search_pb2.Source(filename="a.pdf", passage="because")]))
+    assert r.answer == "yes [a.pdf]"
+    assert stub.model.seen[0] == ("why?", [{"filename": "a.pdf", "passage": "because"}])
+
+
+def test_answer_is_unavailable_when_the_model_server_has_no_answer_model(stub):
+    stub.model.answer_text = None
+    with pytest.raises(grpc.RpcError) as e:
+        stub.Answer(search_pb2.AnswerRequest(query="q", sources=[search_pb2.Source(filename="a", passage="p")]))
+    assert e.value.code() == grpc.StatusCode.UNAVAILABLE
+
+
+@pytest.mark.parametrize("req", [search_pb2.AnswerRequest(query="q"), search_pb2.AnswerRequest(sources=[search_pb2.Source(filename="a", passage="p")])])
+def test_answer_rejects_blank_query_and_no_sources(stub, req):
+    with pytest.raises(grpc.RpcError) as e:
+        stub.Answer(req)
+    assert e.value.code() == grpc.StatusCode.INVALID_ARGUMENT
 
 
 @pytest.mark.parametrize("req", [search_pb2.RerankRequest(query="  ", passages=["a"]), search_pb2.RerankRequest(query="q")])
@@ -111,3 +137,9 @@ def test_model_client_returns_both_query_vectors():
     body = {"text_vector": [1.0], "image_vector": [2.0, 3.0]}
     client = ModelClient("http://x", transport=httpx.MockTransport(lambda r: httpx.Response(200, json=body)))
     assert client.embed_query("cats") == body
+
+
+def test_model_client_answer_is_none_on_503_and_text_otherwise():
+    off = ModelClient("http://x", transport=httpx.MockTransport(lambda r: httpx.Response(503)))
+    on = ModelClient("http://x", transport=httpx.MockTransport(lambda r: httpx.Response(200, json={"answer": "hi"})))
+    assert off.answer("q", []) is None and on.answer("q", []) == "hi"

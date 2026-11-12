@@ -11,7 +11,16 @@ class ModelClient:
         r.raise_for_status()
         return r.json()
 
-    def rerank(self, query: str, passages: list[str]) -> list[float]:
-        r = self._http.post("/rerank", json={"query": query, "passages": passages})
+    def rerank(self, query: str, passages: list[str], highlight_top: int) -> dict:
+        """Returns {"scores": ..., "highlights": ...}."""
+        r = self._http.post("/rerank", json={"query": query, "passages": passages, "highlight_top": highlight_top})
         r.raise_for_status()
-        return r.json()["scores"]
+        return r.json()
+
+    def answer(self, question: str, sources: list[dict]) -> str | None:
+        """None when the model server has no answer model."""
+        r = self._http.post("/answer", json={"question": question, "sources": sources}, timeout=120)
+        if r.status_code == 503:
+            return None
+        r.raise_for_status()
+        return r.json()["answer"]
