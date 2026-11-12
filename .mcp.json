@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "graphify": {
+      "command": "/home/nitin/.local/share/uv/tools/graphifyy/bin/python",
+      "args": [
+        "-m",
+        "graphify.serve",
+        "/mnt/CODE/search-engine-v2/graphify-out/graph.json"
+      ]
+    }
+  }
+}

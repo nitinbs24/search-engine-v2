@@ -14,3 +14,5 @@ docker-compose.override.yml
 # generated at image build from shared/proto
 workers/search/proto_gen/
 backend/proto/
+# graphify knowledge-graph outputs (regenerate with /graphify)
+graphify-out/
