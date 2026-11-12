@@ -74,10 +74,7 @@ services:
       start_period: 10s
     restart: unless-stopped
 
-  # Run by `make up` after the stack is healthy. Kept out of the default set because
-  # `up --wait` treats a finished one-shot container that nothing depends on as a failure.
   minio-init:
-    profiles: [init]
     image: bitnamilegacy/minio:2025.7.23-debian-12-r5  # ships mc
     depends_on:
       minio:
@@ -126,6 +123,21 @@ services:
       start_period: 60s
     restart: unless-stopped
 
+  opensearch-init:
+    image: python:3.11-slim
+    depends_on:
+      opensearch:
+        condition: service_healthy
+    environment:
+      OPENSEARCH_URL: http://opensearch:9200
+      OPENSEARCH_INDEX: ${OPENSEARCH_INDEX}
+      MODEL_SPEC: /model_spec.json
+    volumes:
+      - ./opensearch/init.py:/init.py:ro
+      - ../workers/model-server/model_spec.json:/model_spec.json:ro
+    entrypoint: ["python", "/init.py"]
+    restart: "no"
+
   redis:
     image: redis:7.4-alpine
     ports:
@@ -140,7 +152,79 @@ services:
       retries: 10
     restart: unless-stopped
 
+  model-server:
+    build: ../workers/model-server
+    ports:
+      - "127.0.0.1:8000:8000"
+    volumes:
+      - hf-cache:/root/.cache/huggingface
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 60s
+    restart: unless-stopped
+
+  ingestion:
+    build: ../workers/ingestion
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      KAFKA_TOPIC: ${KAFKA_TOPIC}
+      KAFKA_DLQ_TOPIC: ${KAFKA_DLQ_TOPIC}
+      MINIO_ENDPOINT: minio:9000
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+      TIKA_URL: http://tika:9998
+      MODEL_SERVER_URL: http://model-server:8000
+      OPENSEARCH_URL: http://opensearch:9200
+      OPENSEARCH_INDEX: ${OPENSEARCH_INDEX}
+    depends_on:
+      # the index must exist with the right mapping before the first document arrives
+      opensearch-init: {condition: service_completed_successfully}
+      minio-init: {condition: service_completed_successfully}
+      model-server: {condition: service_healthy}
+      tika: {condition: service_healthy}
+    restart: unless-stopped
+
+  search-worker:
+    build:
+      context: ..
+      dockerfile: workers/search/Dockerfile
+    environment:
+      MODEL_SERVER_URL: http://model-server:8000
+    depends_on:
+      model-server: {condition: service_healthy}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket; socket.create_connection(('localhost', 50051), 2)"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    restart: unless-stopped
+
+  backend:
+    build:
+      context: ..
+      dockerfile: backend/Dockerfile
+    ports:
+      - "127.0.0.1:8080:8080"
+    environment:
+      SEARCH_WORKER_ADDR: search-worker:50051
+      OPENSEARCH_URL: http://opensearch:9200
+      OPENSEARCH_INDEX: ${OPENSEARCH_INDEX}
+    depends_on:
+      search-worker: {condition: service_healthy}
+      opensearch-init: {condition: service_completed_successfully}
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://localhost:8080/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
 volumes:
+  hf-cache:
   kafka-data:
   minio-data:
   opensearch-data:
