@@ -40,6 +40,7 @@ services:
       BOOTSTRAP: kafka:9092
       KAFKA_TOPIC: ${KAFKA_TOPIC}
       KAFKA_DLQ_TOPIC: ${KAFKA_DLQ_TOPIC}
+      KAFKA_DLQ_FAILED_TOPIC: ${KAFKA_DLQ_FAILED_TOPIC:-file-upload-events-dlq-failed}
     volumes:
       - ./kafka/topics.sh:/topics.sh:ro
     entrypoint: ["bash", "/topics.sh"]
@@ -154,6 +155,8 @@ services:
 
   model-server:
     build: ../workers/model-server
+    environment:
+      ANSWER_ENABLED: ${ANSWER_ENABLED:-0}
     ports:
       - "127.0.0.1:8000:8000"
     volumes:
@@ -185,6 +188,18 @@ services:
       minio-init: {condition: service_completed_successfully}
       model-server: {condition: service_healthy}
       tika: {condition: service_healthy}
+    restart: unless-stopped
+
+  dlq-retry:
+    build: ../workers/ingestion
+    command: ["python", "dlq_retry_worker.py"]
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      KAFKA_TOPIC: ${KAFKA_TOPIC}
+      KAFKA_DLQ_TOPIC: ${KAFKA_DLQ_TOPIC}
+      KAFKA_DLQ_FAILED_TOPIC: ${KAFKA_DLQ_FAILED_TOPIC:-file-upload-events-dlq-failed}
+    depends_on:
+      kafka-init: {condition: service_completed_successfully}
     restart: unless-stopped
 
   search-worker:
