@@ -112,3 +112,54 @@ def test_model_client_raises_on_server_error():
     client = ModelClient("http://x", transport=httpx.MockTransport(lambda r: httpx.Response(500)))
     with pytest.raises(httpx.HTTPStatusError):
         asyncio.run(client.embed_texts(["a"]))
+
+
+class FakeMessage:
+    def value(self):
+        return b"not json"  # fails processing, so the worker must use the dead-letter topic
+
+    def error(self):
+        return None
+
+
+class FakeConsumer:
+    def __init__(self, worker):
+        self.worker, self.committed = worker, []
+
+    def poll(self, timeout):
+        self.worker.stop = True  # one message, then the loop ends
+        return FakeMessage()
+
+    def commit(self, msg):
+        self.committed.append(msg)
+
+    def close(self):
+        pass
+
+
+class FakeDlq:
+    def __init__(self, delivery_error=None):
+        self.delivery_error, self.produced = delivery_error, []
+
+    def produce(self, topic, value, on_delivery):
+        self.produced.append(topic)
+        self._report = on_delivery
+
+    def flush(self, timeout):
+        self._report(self.delivery_error, None)
+        return 0  # nothing left queued, whether or not delivery succeeded
+
+
+def test_failed_message_is_committed_once_the_dead_letter_write_is_confirmed():
+    w = worker(FakeIndex())
+    consumer, dlq = FakeConsumer(w), FakeDlq()
+    asyncio.run(w.run(consumer, dlq, "dlq"))
+    assert dlq.produced == ["dlq"] and len(consumer.committed) == 1
+
+
+def test_offset_is_not_committed_when_the_dead_letter_write_fails():
+    w = worker(FakeIndex())
+    consumer, dlq = FakeConsumer(w), FakeDlq(delivery_error="broker rejected the message")
+    with pytest.raises(RuntimeError, match="dead-letter"):
+        asyncio.run(w.run(consumer, dlq, "dlq"))
+    assert consumer.committed == []

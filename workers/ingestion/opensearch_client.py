@@ -12,7 +12,8 @@ class Index:
             {"_index": self.index, "_id": d["_id"], "_source": {k: v for k, v in d.items() if k != "_id"}}
             for d in docs
         ]
-        helpers.bulk(self._client, actions, chunk_size=200)
+        # wait_for: a delete arriving right after must be able to see these chunks
+        helpers.bulk(self._client, actions, chunk_size=200, refresh="wait_for")
 
     def delete_by_object_key(self, bucket: str, key: str) -> None:
         query = {"bool": {"filter": [{"term": {"bucket": bucket}}, {"term": {"object_key": key}}]}}

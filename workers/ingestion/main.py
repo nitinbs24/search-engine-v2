@@ -97,8 +97,10 @@ class IngestionWorker:
                 log.exception("failed, sending to the dead-letter topic")
                 record = {"original_payload": msg.value().decode("utf-8", "replace"), "error": str(exc),
                           "failed_at": datetime.now(timezone.utc).isoformat()}
-                dlq.produce(dlq_topic, value=json.dumps(record).encode())
-                if dlq.flush(10):
+                errors = []  # flush() only says the queue is empty, not that the write succeeded
+                dlq.produce(dlq_topic, value=json.dumps(record).encode(),
+                            on_delivery=lambda err, _msg: err and errors.append(err))
+                if dlq.flush(10) or errors:
                     raise RuntimeError("could not reach the dead-letter topic; not committing") from exc
             consumer.commit(msg)
         consumer.close()
