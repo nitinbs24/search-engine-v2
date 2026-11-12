@@ -55,6 +55,7 @@ def client():
     server.text_embedder = FakeEmbedder()
     server.reranker = FakeReranker()
     server.image_embedder = FakeImageEmbedder()
+    server.answerer = None
     return TestClient(server.app)  # not entered as a context manager: no real model load
 
 
@@ -98,13 +99,23 @@ def test_health_reports_model_and_device(client):
     r = client.get("/health")
     assert r.status_code == 200
     assert r.json() == {"status": "ok", "device": "cpu",
-                        "models": {"text": "fake", "image": "fake-image", "reranker": "fake-rerank"}}
+                        "models": {"text": "fake", "image": "fake-image", "reranker": "fake-rerank", "answer": None}}
 
 
 @pytest.mark.parametrize("missing", ["text_embedder", "image_embedder", "reranker"])
 def test_health_is_503_until_every_model_is_loaded(client, missing):
     setattr(server, missing, None)
     assert TestClient(server.app).get("/health").status_code == 503
+
+
+def test_rerank_highlights_the_best_sentence_of_the_top_passages(client):
+    r = client.post("/rerank", json={"query": "q", "passages": ["Aa. Bbbbbbb.", "Cc. Dd.", "Ee. Ffffffffffff."], "highlight_top": 1})
+    assert r.json()["highlights"] == ["", "", "Ffffffffffff."]
+
+
+def test_rerank_without_highlight_top_returns_empty_highlights(client):
+    r = client.post("/rerank", json={"query": "q", "passages": ["Aa. Bb."]})
+    assert r.json()["highlights"] == [""]
 
 
 def test_rerank_returns_one_raw_score_per_passage_in_input_order(client):
@@ -120,3 +131,57 @@ def test_rerank_rejects_blank_query_and_empty_passages(client, body):
 
 def test_reranker_name_comes_from_the_spec():
     assert json.loads((ROOT / "model_spec.json").read_text())["reranker"]["name"]
+
+
+class FakeAnswerer:
+    name = "fake-answer"
+
+    def answer(self, question, sources):
+        return f"{question}: " + ", ".join(s["filename"] for s in sources)
+
+
+SOURCES = [{"filename": "a.pdf", "passage": "pa"}, {"filename": "b.txt", "passage": "pb"}]
+
+
+def test_answer_is_503_when_the_model_is_not_loaded_and_health_still_passes(client):
+    assert client.post("/answer", json={"question": "q", "sources": SOURCES}).status_code == 503
+    assert client.get("/health").status_code == 200
+
+
+def test_answer_uses_the_loaded_model_and_health_names_it(client):
+    server.answerer = FakeAnswerer()
+    r = client.post("/answer", json={"question": "why", "sources": SOURCES})
+    assert r.status_code == 200 and r.json() == {"answer": "why: a.pdf, b.txt"}
+    assert client.get("/health").json()["models"]["answer"] == "fake-answer"
+
+
+@pytest.mark.parametrize("body", [{"question": " ", "sources": SOURCES}, {"question": "q", "sources": []}, {"question": "q"}])
+def test_answer_rejects_blank_question_and_no_sources(client, body):
+    server.answerer = FakeAnswerer()
+    assert client.post("/answer", json=body).status_code == 422
+
+
+class FakeCuda:
+    def __init__(self, available):
+        self.cuda = type("C", (), {"is_available": staticmethod(lambda: available)})
+
+
+@pytest.mark.parametrize("enabled,cuda,loads", [("1", True, True), ("1", False, False), ("", True, False)])
+def test_answer_model_loads_only_when_enabled_and_cuda_is_visible(monkeypatch, enabled, cuda, loads):
+    import sys
+    monkeypatch.setenv("ANSWER_ENABLED", enabled)
+    monkeypatch.setitem(sys.modules, "torch", FakeCuda(cuda))
+    monkeypatch.setitem(sys.modules, "answerer", type("M", (), {"Answerer": lambda **kw: FakeAnswerer()}))
+    assert (server.load_answerer() is not None) == loads
+
+
+def test_answer_model_that_fails_to_load_does_not_stop_the_server(monkeypatch):
+    import sys
+
+    def broken(**kw):
+        raise RuntimeError("out of GPU memory")
+
+    monkeypatch.setenv("ANSWER_ENABLED", "1")
+    monkeypatch.setitem(sys.modules, "torch", FakeCuda(True))
+    monkeypatch.setitem(sys.modules, "answerer", type("M", (), {"Answerer": broken}))
+    assert server.load_answerer() is None

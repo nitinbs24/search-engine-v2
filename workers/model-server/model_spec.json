@@ -9,5 +9,8 @@
   "image": {
     "name": "sentence-transformers/clip-ViT-B-32",
     "dimension": 512
+  },
+  "answer": {
+    "name": "Qwen/Qwen2.5-0.5B-Instruct"
   }
 }
