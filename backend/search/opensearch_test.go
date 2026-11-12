@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -42,7 +43,7 @@ func legs(t *testing.T, q any) []any {
 }
 
 func TestBuildQueryMatchesGoldenFile(t *testing.T) {
-	got := asJSON(t, BuildQuery(Params{Text: "kubernetes report", Vector: []float32{0.25, 0.75}, Filters: allFilters, Limit: 10}))
+	got := asJSON(t, BuildQuery(Params{Text: "kubernetes report", Vector: []float32{0.25, 0.75}, ImageVector: []float32{0.5, 0.5, 0}, Filters: allFilters, Limit: 10}))
 	raw, err := os.ReadFile("testdata/hybrid_query.json")
 	if err != nil {
 		t.Fatal(err)
@@ -58,18 +59,32 @@ func TestBuildQueryMatchesGoldenFile(t *testing.T) {
 }
 
 func TestEveryLegCarriesTheSameFilter(t *testing.T) {
-	q := asJSON(t, BuildQuery(Params{Text: "x", Vector: []float32{1}, Filters: allFilters, Limit: 10}))
+	q := asJSON(t, BuildQuery(Params{Text: "x", Vector: []float32{1}, ImageVector: []float32{1}, Filters: allFilters, Limit: 10}))
 	l := legs(t, q)
+	if len(l) != 3 {
+		t.Fatalf("want 3 legs, got %d", len(l))
+	}
 	bm25 := l[0].(map[string]any)["bool"].(map[string]any)["filter"]
 	knn := l[1].(map[string]any)["knn"].(map[string]any)["text_embedding"].(map[string]any)["filter"].(map[string]any)["bool"].(map[string]any)["filter"]
-	if bm25 == nil || !reflect.DeepEqual(bm25, knn) {
-		t.Fatalf("filters differ between legs:\nbm25: %v\nknn:  %v", bm25, knn)
+	image := l[2].(map[string]any)["knn"].(map[string]any)["image_embedding"].(map[string]any)["filter"].(map[string]any)["bool"].(map[string]any)["filter"]
+	if bm25 == nil || !reflect.DeepEqual(bm25, knn) || !reflect.DeepEqual(bm25, image) {
+		t.Fatalf("filters differ between legs:\nbm25:  %v\nknn:   %v\nimage: %v", bm25, knn, image)
+	}
+}
+
+func TestEmptyImageVectorOmitsTheImageLeg(t *testing.T) {
+	q := asJSON(t, BuildQuery(Params{Text: "x", Vector: []float32{1}, Filters: allFilters, Limit: 10}))
+	if n := len(legs(t, q)); n != 2 {
+		t.Fatalf("want 2 legs, got %d", n)
 	}
 }
 
 func TestNoFiltersMeansNoFilterClauses(t *testing.T) {
 	for _, f := range []*pb.Filters{nil, {}} {
-		l := legs(t, asJSON(t, BuildQuery(Params{Text: "x", Vector: []float32{1}, Filters: f, Limit: 10})))
+		l := legs(t, asJSON(t, BuildQuery(Params{Text: "x", Vector: []float32{1}, ImageVector: []float32{1}, Filters: f, Limit: 10})))
+		if _, ok := l[2].(map[string]any)["knn"].(map[string]any)["image_embedding"].(map[string]any)["filter"]; ok {
+			t.Fatal("image leg has a filter")
+		}
 		if _, ok := l[0].(map[string]any)["bool"].(map[string]any)["filter"]; ok {
 			t.Fatal("bm25 leg has a filter")
 		}
@@ -121,5 +136,98 @@ func TestSearchReportsOpenSearchErrors(t *testing.T) {
 	c := &Client{URL: srv.URL, Index: "docs", HTTP: srv.Client()}
 	if _, err := c.Search(context.Background(), Params{Text: "x", Vector: []float32{1}, Limit: 2}); err == nil {
 		t.Fatal("expected an error")
+	}
+}
+
+func hitJSON(id, key string) string {
+	return `{"_id":"` + id + `","_score":0.01,"_source":{"bucket":"uploads","object_key":"` + key + `","chunk_text":"t"}}`
+}
+
+// One file's chunks fill the first pool; the second file only appears when the pool grows.
+func TestSearchWidensThePoolUntilThereAreEnoughDistinctFiles(t *testing.T) {
+	var sizes []int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct{ Size int }
+		raw, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(raw, &body)
+		sizes = append(sizes, body.Size)
+		hits := ""
+		for i := 0; i < body.Size-1; i++ {
+			hits += hitJSON("a#"+string(rune('a'+i%26)), "a.pdf") + ","
+		}
+		last := "a.pdf"
+		if body.Size > 2*poolFactor {
+			last = "b.pdf"
+		}
+		_, _ = w.Write([]byte(`{"hits":{"hits":[` + hits + hitJSON("last", last) + `]}}`))
+	}))
+	defer srv.Close()
+
+	c := &Client{URL: srv.URL, Index: "docs", HTTP: srv.Client()}
+	got, err := c.Search(context.Background(), Params{Text: "x", Vector: []float32{1}, Limit: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 || got[1].ObjectKey != "b.pdf" || len(sizes) != 2 || sizes[1] <= sizes[0] {
+		t.Fatalf("got %+v with request sizes %v", got, sizes)
+	}
+}
+
+func TestSearchStopsWideningWhenTheIndexIsExhausted(t *testing.T) {
+	calls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		_, _ = w.Write([]byte(`{"hits":{"hits":[` + hitJSON("a#0", "a.pdf") + `]}}`))
+	}))
+	defer srv.Close()
+	c := &Client{URL: srv.URL, Index: "docs", HTTP: srv.Client()}
+	got, err := c.Search(context.Background(), Params{Text: "x", Vector: []float32{1}, Limit: 5})
+	if err != nil || len(got) != 1 || calls != 1 {
+		t.Fatalf("got %v %v after %d calls", got, err, calls)
+	}
+}
+
+func TestSameKeyInDifferentBucketsAreDifferentObjects(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"hits":{"hits":[` +
+			`{"_id":"1","_source":{"bucket":"uploads","object_key":"a.txt","chunk_text":"x"}},` +
+			`{"_id":"2","_source":{"bucket":"archive","object_key":"a.txt","chunk_text":"y"}}]}}`))
+	}))
+	defer srv.Close()
+	c := &Client{URL: srv.URL, Index: "docs", HTTP: srv.Client()}
+	got, err := c.Search(context.Background(), Params{Text: "x", Vector: []float32{1}, Limit: 5})
+	if err != nil || len(got) != 2 {
+		t.Fatalf("got %+v %v", got, err)
+	}
+}
+
+func TestImageHitsAreScoredByRawCosineSimilarityToTheQuery(t *testing.T) {
+	const body = `{"hits":{"hits":[
+ {"_id":"uploads/cat.png#0","_score":0.03,"_source":{"bucket":"uploads","object_key":"cat.png","mime_type":"image/png","image_embedding":[0.6,0.8]}},
+ {"_id":"uploads/a.txt#0","_score":0.02,"_source":{"bucket":"uploads","object_key":"a.txt","mime_type":"text/plain","chunk_text":"a"}}
+]}}`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte(body)) }))
+	defer srv.Close()
+	c := &Client{URL: srv.URL, Index: "docs", HTTP: srv.Client()}
+	got, err := c.Search(context.Background(), Params{Text: "x", Vector: []float32{1}, ImageVector: []float32{0.8, 0.6}, Limit: 5})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 || math.Abs(got[0].Score-0.96) > 1e-6 || got[1].Score != 0.02 {
+		t.Fatalf("want cosine 0.96 for the image and the fused score for the text, got %+v", got)
+	}
+}
+
+func TestSeveralChunksPerFileAreKeptAsPassagesForReranking(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte(cannedResponse)) }))
+	defer srv.Close()
+	c := &Client{URL: srv.URL, Index: "docs", HTTP: srv.Client()}
+	got, err := c.Search(context.Background(), Params{Text: "x", Vector: []float32{1}, Limit: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// a.pdf has two chunks in the response; the limit of one file must not cut its second chunk off.
+	if len(got) != 1 || !reflect.DeepEqual(got[0].Passages, []string{"third chunk of a", "first chunk of a"}) {
+		t.Fatalf("got %+v", got)
 	}
 }
