@@ -18,3 +18,4 @@ backend/proto/
 graphify-out/
 # eval corpus and evaluation harness (local only)
 eval/
+.ua/
