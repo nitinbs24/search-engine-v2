@@ -120,10 +120,12 @@ Report bug IDs (S1, I5, …) refer to `docs/ANALYSIS_REPORT.md`.
 
 ## Phase 7 — Finish
 
-- [ ] **T23 Docs** (S) — Accept: `docs/architecture.md`, `docs/setup.md`, README match the code; measured memory per service recorded. Verify: a fresh clone following `setup.md` reaches a green smoke test.
-- [ ] **T24 Final pass** (S) — Accept: model names/dimensions appear only in `model_spec.json`; no unused files or dependencies; all tests green. Verify: `grep` for model names; `make test`.
+- [x] **T23 Docs** (S) — Accept: `docs/architecture.md`, `docs/setup.md`, README match the code; measured memory per service recorded. Verify: a fresh clone following `setup.md` reaches a green smoke test.
+  - 2026-11-13: fresh `git clone` (no `.env`) → `make up && make smoke` green in 8 min (warm build cache). Memory table in `architecture.md` (CPU and GPU). `eval/` is gitignored, so `make eval` needs the local corpus — noted in `setup.md`.
+- [x] **T24 Final pass** (S) — Accept: model names/dimensions appear only in `model_spec.json`; no unused files or dependencies; all tests green. Verify: `grep` for model names; `make test`.
+  - 2026-11-13: model-name grep clean outside `model_spec.json` and docs (three code comments reworded); every declared dependency is imported (`grpcio-tools` is build-time); every module is imported; `infrastructure/k8s/.gitkeep` removed; `make test` green.
 
 ### Checkpoint G
-- [ ] Every success criterion in `docs/intent/refactor.md` met
+- [x] Every success criterion in `docs/intent/refactor.md` met — text/image relevance: `docs/model-evaluation.md` (text recall@5 0.927, image 1.000); one command each: `make up`, `deploy.sh`; 15 GB laptop: ≈3.3 GiB idle, CPU and GPU both verified; bugs fixed with parser, query-builder and gateway tests
 - [ ] `/coderabbit:code-review`
 - [ ] Owner sign-off

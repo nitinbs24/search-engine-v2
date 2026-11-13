@@ -41,11 +41,11 @@ func workerReady(conn *grpc.ClientConn) func(context.Context) error {
 }
 
 // Cut-offs on absolute scores; override with RERANK_MIN_SCORE and IMAGE_MIN_SCORE.
-// Rerank: the raw ms-marco cross-encoder logit (not a probability). Unrelated pairs fall to about
+// Rerank: the reranker's raw cross-encoder logit (not a probability). Unrelated pairs fall to about
 // -8 or lower, but relevant paraphrased questions often score well below 0 (eval: correct hits'
 // median -0.8, 18 of 40 under -2), so the cut sits just above the unrelated cluster
 // (see docs/model-evaluation.md, 2026-11-12).
-// Image: cosine similarity between the query and the image. With CLIP a matching caption
+// Image: cosine similarity between the query and the image. With the image model a matching caption
 // scores around 0.3 and an unrelated one around 0.17.
 const (
 	defaultMinRerankScore = -7.0

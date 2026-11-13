@@ -2,7 +2,7 @@
 chunker.py — LangChain-based text chunking for the ingestion pipeline.
 
 Splits extracted text into overlapping chunks suitable for embedding by
-``all-MiniLM-L6-v2`` (256 word-piece token limit).  Each chunk carries
+the text model in model_spec.json (256 word-piece token limit).  Each chunk carries
 positional metadata (index, character offsets, total count) so downstream
 consumers can reconstruct context or highlight search results.
 
