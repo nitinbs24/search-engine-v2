@@ -105,15 +105,17 @@ Report bug IDs (S1, I5, …) refer to `docs/ANALYSIS_REPORT.md`.
 
 ## Phase 6 — minikube
 
-- [ ] **T21 Manifests + deploy script** (M) — deps: Checkpoint E; owner has installed minikube + kubectl
+- [x] **T21 Manifests + deploy script** (M) — deps: Checkpoint E; owner has installed minikube + kubectl
   - Accept: same services as Compose; credentials in a Secret; no unconditional GPU request; probes hit cheap endpoints; total memory requests fit in an 8 GB minikube.
   - Verify: `infrastructure/k8s/deploy.sh` then `make smoke TARGET=minikube`.
-- [ ] **T22 GPU opt-in** (S) — deps: T21; owner has installed NVIDIA Container Toolkit
+  - Status 2026-11-13: manifests, `deploy.sh`, `smoke.sh` minikube target written; `test_manifests.py` (Compose parity, memory ≤ 7 GiB, no GPU, Secret-only credentials) and kubeconform pass. Verified live: `deploy.sh` + `make smoke TARGET=minikube` green (re-deploy 6 min), all pods 0 restarts. Idle memory after smoke: opensearch 1.43 GiB, model-server 1.0 GiB, kafka 330 MiB, tika 187 MiB, search-worker 85, minio 76, ingestion 69, frontend 53, dlq-retry 18, backend 13, redis 4 MiB; k8s system ≈ 0.45 GiB.
+- [x] **T22 GPU opt-in** (S) — deps: T21; owner has installed NVIDIA Container Toolkit
   - Accept: one flag enables GPU for the model server on Compose and on minikube; without it everything runs on CPU.
   - Verify: `/health` reports `cuda` with the flag and `cpu` without.
+  - Status 2026-11-13: Compose verified (`GPU=1` → `cuda`, without → `cpu`). minikube verified too: `GPU=1 deploy.sh` on a fresh `--gpus=all` cluster (27 min) → model-server gets `nvidia.com/gpu: 1`, `/health` reports `cuda`; smoke green. Smoke's `mc pipe` now uses `--part-size 16MiB` (its 528 MiB default was OOM-killed in the 512 MiB minio pod).
 
 ### Checkpoint F
-- [ ] Smoke test green on minikube
+- [x] Smoke test green on minikube — 2026-11-13
 - [ ] Owner review
 
 ## Phase 7 — Finish

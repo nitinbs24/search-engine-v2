@@ -1,7 +1,8 @@
 FROM python:3.11-slim
 WORKDIR /app
-# shortcut: CPU-only torch keeps the image small; the GPU build is added with the GPU opt-in (T22).
-RUN pip install --no-cache-dir torch==2.5.1 --index-url https://download.pytorch.org/whl/cpu
+# CPU-only torch by default keeps the image small; the GPU opt-in (GPU=1) passes the CUDA index.
+ARG TORCH_INDEX=https://download.pytorch.org/whl/cpu
+RUN pip install --no-cache-dir torch==2.5.1 --index-url $TORCH_INDEX
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
