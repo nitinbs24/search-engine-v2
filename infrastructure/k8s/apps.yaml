@@ -1,0 +1,156 @@
+# Application services, mirroring infrastructure/docker-compose.yml. Images are built by deploy.sh
+# straight into minikube's Docker (the Compose build, same tags), so they are never pulled.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata: {name: hf-cache, labels: {app: model-server}}
+spec: {accessModes: [ReadWriteOnce], resources: {requests: {storage: 5Gi}}}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: model-server, labels: {app: model-server}}
+spec:
+  selector: {matchLabels: {app: model-server}}
+  strategy: {type: Recreate}
+  template:
+    metadata: {labels: {app: model-server}}
+    spec:
+      enableServiceLinks: false
+      containers:
+        - name: model-server
+          image: search-engine-v2-model-server:latest
+          imagePullPolicy: Never
+          env:
+            - {name: ANSWER_ENABLED, valueFrom: {secretKeyRef: {name: app-env, key: ANSWER_ENABLED, optional: true}}}
+          ports: [{containerPort: 8000}]
+          # /health is a dict lookup; it turns 200 once every model is loaded
+          readinessProbe: {httpGet: {path: /health, port: 8000}, periodSeconds: 10}
+          # No GPU here: deploy.sh GPU=1 patches one in.
+          resources: {requests: {memory: 2Gi}, limits: {memory: 3Gi}}
+          volumeMounts: [{name: hf-cache, mountPath: /root/.cache/huggingface}]
+      volumes: [{name: hf-cache, persistentVolumeClaim: {claimName: hf-cache}}]
+---
+apiVersion: v1
+kind: Service
+metadata: {name: model-server, labels: {app: model-server}}
+spec: {selector: {app: model-server}, ports: [{port: 8000}]}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: ingestion, labels: {app: ingestion}}
+spec:
+  selector: {matchLabels: {app: ingestion}}
+  template:
+    metadata: {labels: {app: ingestion}}
+    spec:
+      enableServiceLinks: false
+      containers:
+        - name: ingestion
+          image: search-engine-v2-ingestion:latest
+          imagePullPolicy: Never
+          envFrom: [{secretRef: {name: app-env}}]
+          env:
+            - {name: KAFKA_BOOTSTRAP_SERVERS, value: "kafka:9092"}
+            - {name: MINIO_ENDPOINT, value: "minio:9000"}
+            - {name: TIKA_URL, value: "http://tika:9998"}
+            - {name: MODEL_SERVER_URL, value: "http://model-server:8000"}
+            - {name: OPENSEARCH_URL, value: "http://opensearch:9200"}
+          resources: {requests: {memory: 256Mi}, limits: {memory: 512Mi}}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: dlq-retry, labels: {app: dlq-retry}}
+spec:
+  selector: {matchLabels: {app: dlq-retry}}
+  template:
+    metadata: {labels: {app: dlq-retry}}
+    spec:
+      enableServiceLinks: false
+      containers:
+        - name: dlq-retry
+          image: search-engine-v2-ingestion:latest
+          imagePullPolicy: Never
+          command: ["python", "dlq_retry_worker.py"]
+          envFrom: [{secretRef: {name: app-env}}]
+          env: [{name: KAFKA_BOOTSTRAP_SERVERS, value: "kafka:9092"}]
+          resources: {requests: {memory: 128Mi}, limits: {memory: 256Mi}}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: search-worker, labels: {app: search-worker}}
+spec:
+  selector: {matchLabels: {app: search-worker}}
+  template:
+    metadata: {labels: {app: search-worker}}
+    spec:
+      enableServiceLinks: false
+      containers:
+        - name: search-worker
+          image: search-engine-v2-search-worker:latest
+          imagePullPolicy: Never
+          env: [{name: MODEL_SERVER_URL, value: "http://model-server:8000"}]
+          ports: [{containerPort: 50051}]
+          readinessProbe: {tcpSocket: {port: 50051}, periodSeconds: 10}
+          resources: {requests: {memory: 256Mi}, limits: {memory: 512Mi}}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: search-worker}
+spec: {selector: {app: search-worker}, ports: [{port: 50051}]}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: backend, labels: {app: backend}}
+spec:
+  selector: {matchLabels: {app: backend}}
+  template:
+    metadata: {labels: {app: backend}}
+    spec:
+      enableServiceLinks: false
+      containers:
+        - name: backend
+          image: search-engine-v2-backend:latest
+          imagePullPolicy: Never
+          env:
+            - {name: OPENSEARCH_INDEX, valueFrom: {secretKeyRef: {name: app-env, key: OPENSEARCH_INDEX}}}
+            - {name: RERANK_MIN_SCORE, valueFrom: {secretKeyRef: {name: app-env, key: RERANK_MIN_SCORE, optional: true}}}
+            - {name: IMAGE_MIN_SCORE, valueFrom: {secretKeyRef: {name: app-env, key: IMAGE_MIN_SCORE, optional: true}}}
+            - {name: SEARCH_WORKER_ADDR, value: "search-worker:50051"}
+            - {name: OPENSEARCH_URL, value: "http://opensearch:9200"}
+            - {name: REDIS_ADDR, value: "redis:6379"}
+          ports: [{containerPort: 8080}]
+          # not /health: it pings every dependency, and search still works with Redis down
+          readinessProbe: {tcpSocket: {port: 8080}, periodSeconds: 10}
+          resources: {requests: {memory: 64Mi}, limits: {memory: 256Mi}}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: backend}
+spec: {selector: {app: backend}, ports: [{port: 8080}]}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: frontend, labels: {app: frontend}}
+spec:
+  selector: {matchLabels: {app: frontend}}
+  template:
+    metadata: {labels: {app: frontend}}
+    spec:
+      enableServiceLinks: false
+      containers:
+        - name: frontend
+          image: search-engine-v2-frontend:latest
+          imagePullPolicy: Never
+          env:
+            - {name: BACKEND_URL, value: "http://backend:8080"}
+            - {name: MINIO_ENDPOINT, value: "http://minio:9000"}
+            - {name: MINIO_ACCESS_KEY, valueFrom: {secretKeyRef: {name: app-env, key: MINIO_ROOT_USER}}}
+            - {name: MINIO_SECRET_KEY, valueFrom: {secretKeyRef: {name: app-env, key: MINIO_ROOT_PASSWORD}}}
+            - {name: MINIO_BUCKET, valueFrom: {secretKeyRef: {name: app-env, key: MINIO_BUCKET}}}
+          ports: [{containerPort: 3000}]
+          readinessProbe: {tcpSocket: {port: 3000}, periodSeconds: 10}
+          resources: {requests: {memory: 256Mi}, limits: {memory: 512Mi}}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: frontend}
+spec: {selector: {app: frontend}, ports: [{port: 3000}]}

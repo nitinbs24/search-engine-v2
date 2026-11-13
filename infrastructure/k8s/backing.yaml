@@ -1,0 +1,167 @@
+# Backing services, mirroring infrastructure/docker-compose.yml. Applied by deploy.sh into its namespace.
+# Services are ClusterIP only (no auth on these services); reach them with kubectl port-forward.
+# enableServiceLinks is off everywhere: the injected KAFKA_PORT, MINIO_PORT, ... variables
+# would be read as configuration by the kafka and minio images.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata: {name: kafka-data}
+spec: {accessModes: [ReadWriteOnce], resources: {requests: {storage: 2Gi}}}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: kafka, labels: {app: kafka}}
+spec:
+  selector: {matchLabels: {app: kafka}}
+  strategy: {type: Recreate}
+  template:
+    metadata: {labels: {app: kafka}}
+    spec:
+      enableServiceLinks: false
+      containers:
+        - name: kafka
+          image: apache/kafka:3.8.1
+          env:
+            - {name: KAFKA_NODE_ID, value: "1"}
+            - {name: KAFKA_PROCESS_ROLES, value: "broker,controller"}
+            # localhost, not the Service: the Service has no endpoint until this pod is ready
+            - {name: KAFKA_CONTROLLER_QUORUM_VOTERS, value: "1@localhost:9093"}
+            - {name: KAFKA_LISTENERS, value: "PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093"}
+            - {name: KAFKA_ADVERTISED_LISTENERS, value: "PLAINTEXT://kafka:9092"}
+            - {name: KAFKA_CONTROLLER_LISTENER_NAMES, value: CONTROLLER}
+            - {name: KAFKA_LISTENER_SECURITY_PROTOCOL_MAP, value: "PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT"}
+            - {name: KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR, value: "1"}
+            - {name: KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR, value: "1"}
+            - {name: KAFKA_TRANSACTION_STATE_LOG_MIN_ISR, value: "1"}
+            - {name: KAFKA_AUTO_CREATE_TOPICS_ENABLE, value: "false"}
+            - {name: KAFKA_LOG_DIRS, value: /var/lib/kafka/data}
+            - {name: KAFKA_HEAP_OPTS, value: "-Xms256m -Xmx512m"}
+          ports: [{containerPort: 9092}]
+          readinessProbe: {tcpSocket: {port: 9092}, periodSeconds: 10}
+          resources: {requests: {memory: 768Mi}, limits: {memory: 1Gi}}
+          volumeMounts: [{name: data, mountPath: /var/lib/kafka/data}]
+      volumes: [{name: data, persistentVolumeClaim: {claimName: kafka-data}}]
+---
+apiVersion: v1
+kind: Service
+metadata: {name: kafka}
+spec: {selector: {app: kafka}, ports: [{port: 9092}]}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata: {name: minio-data, labels: {app: minio}}
+spec: {accessModes: [ReadWriteOnce], resources: {requests: {storage: 5Gi}}}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: minio, labels: {app: minio}}
+spec:
+  selector: {matchLabels: {app: minio}}
+  strategy: {type: Recreate}
+  template:
+    metadata: {labels: {app: minio}}
+    spec:
+      enableServiceLinks: false
+      containers:
+        - name: minio
+          image: bitnamilegacy/minio:2025.7.23-debian-12-r5
+          # Start the server directly; see the note in docker-compose.yml.
+          command: ["minio", "server", "/bitnami/minio/data", "--console-address", ":9001"]
+          env:
+            - {name: MINIO_ROOT_USER, valueFrom: {secretKeyRef: {name: app-env, key: MINIO_ROOT_USER}}}
+            - {name: MINIO_ROOT_PASSWORD, valueFrom: {secretKeyRef: {name: app-env, key: MINIO_ROOT_PASSWORD}}}
+            - {name: MINIO_NOTIFY_KAFKA_ENABLE_1, value: "on"}
+            - {name: MINIO_NOTIFY_KAFKA_BROKERS_1, value: "kafka:9092"}
+            - {name: MINIO_NOTIFY_KAFKA_TOPIC_1, valueFrom: {secretKeyRef: {name: app-env, key: KAFKA_TOPIC}}}
+          ports: [{containerPort: 9000}, {containerPort: 9001}]
+          readinessProbe: {httpGet: {path: /minio/health/live, port: 9000}, periodSeconds: 5}
+          resources: {requests: {memory: 256Mi}, limits: {memory: 512Mi}}
+          volumeMounts: [{name: data, mountPath: /bitnami/minio/data}]
+      volumes: [{name: data, persistentVolumeClaim: {claimName: minio-data}}]
+---
+apiVersion: v1
+kind: Service
+metadata: {name: minio, labels: {app: minio}}
+spec: {selector: {app: minio}, ports: [{name: api, port: 9000}, {name: console, port: 9001}]}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: tika, labels: {app: tika}}
+spec:
+  selector: {matchLabels: {app: tika}}
+  template:
+    metadata: {labels: {app: tika}}
+    spec:
+      enableServiceLinks: false
+      containers:
+        - name: tika
+          image: apache/tika:3.0.0.0
+          env: [{name: TIKA_JAVA_OPTS, value: -Xmx1g}]
+          ports: [{containerPort: 9998}]
+          readinessProbe: {tcpSocket: {port: 9998}, periodSeconds: 10}
+          resources: {requests: {memory: 768Mi}, limits: {memory: 1536Mi}}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: tika}
+spec: {selector: {app: tika}, ports: [{port: 9998}]}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata: {name: opensearch-data}
+spec: {accessModes: [ReadWriteOnce], resources: {requests: {storage: 5Gi}}}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: opensearch, labels: {app: opensearch}}
+spec:
+  selector: {matchLabels: {app: opensearch}}
+  strategy: {type: Recreate}
+  template:
+    metadata: {labels: {app: opensearch}}
+    spec:
+      enableServiceLinks: false
+      containers:
+        - name: opensearch
+          image: opensearchproject/opensearch:2.19.1
+          env:
+            - {name: discovery.type, value: single-node}
+            - {name: DISABLE_SECURITY_PLUGIN, value: "true"}
+            - {name: DISABLE_INSTALL_DEMO_CONFIG, value: "true"}
+            - {name: OPENSEARCH_JAVA_OPTS, value: -Xms1g -Xmx1g}
+          ports: [{containerPort: 9200}]
+          readinessProbe:
+            httpGet: {path: "/_cluster/health?wait_for_status=yellow&timeout=1s", port: 9200}
+            periodSeconds: 10
+            timeoutSeconds: 5
+          resources: {requests: {memory: 1536Mi}, limits: {memory: 2Gi}}
+          volumeMounts: [{name: data, mountPath: /usr/share/opensearch/data}]
+      volumes: [{name: data, persistentVolumeClaim: {claimName: opensearch-data}}]
+---
+apiVersion: v1
+kind: Service
+metadata: {name: opensearch}
+spec: {selector: {app: opensearch}, ports: [{port: 9200}]}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: redis, labels: {app: redis}}
+spec:
+  selector: {matchLabels: {app: redis}}
+  template:
+    metadata: {labels: {app: redis}}
+    spec:
+      enableServiceLinks: false
+      containers:
+        - name: redis
+          image: redis:7.4-alpine
+          command: ["redis-server", "/usr/local/etc/redis/redis.conf"]
+          ports: [{containerPort: 6379}]
+          readinessProbe: {tcpSocket: {port: 6379}, periodSeconds: 5}
+          resources: {requests: {memory: 64Mi}, limits: {memory: 320Mi}}
+          volumeMounts: [{name: conf, mountPath: /usr/local/etc/redis}]
+      volumes: [{name: conf, configMap: {name: redis-conf}}]
+---
+apiVersion: v1
+kind: Service
+metadata: {name: redis}
+spec: {selector: {app: redis}, ports: [{port: 6379}]}

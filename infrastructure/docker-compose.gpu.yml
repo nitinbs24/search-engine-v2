@@ -1,0 +1,11 @@
+# GPU opt-in for the model server: `make up GPU=1`. Needs the NVIDIA Container Toolkit.
+services:
+  model-server:
+    build:
+      args:
+        TORCH_INDEX: https://download.pytorch.org/whl/cu124
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - {driver: nvidia, count: all, capabilities: [gpu]}

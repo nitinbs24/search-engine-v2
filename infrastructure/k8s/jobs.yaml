@@ -1,0 +1,62 @@
+# One-shot setup, same scripts as Compose (mounted from ConfigMaps that deploy.sh builds from the
+# files in infrastructure/). deploy.sh runs each one after the service it needs is ready.
+apiVersion: batch/v1
+kind: Job
+metadata: {name: kafka-init, labels: {job: kafka-init}}
+spec:
+  backoffLimit: 5
+  template:
+    spec:
+      restartPolicy: OnFailure
+      enableServiceLinks: false
+      containers:
+        - name: kafka-init
+          image: apache/kafka:3.8.1
+          command: ["bash", "/scripts/topics.sh"]
+          envFrom: [{secretRef: {name: app-env}}]
+          env:
+            - {name: BOOTSTRAP, value: "kafka:9092"}
+            - {name: KAFKA_HEAP_OPTS, value: -Xmx256m}
+          resources: {requests: {memory: 256Mi}, limits: {memory: 512Mi}}
+          volumeMounts: [{name: scripts, mountPath: /scripts}]
+      volumes: [{name: scripts, configMap: {name: kafka-topics}}]
+---
+apiVersion: batch/v1
+kind: Job
+metadata: {name: minio-init, labels: {job: minio-init}}
+spec:
+  backoffLimit: 5
+  template:
+    spec:
+      restartPolicy: OnFailure
+      enableServiceLinks: false
+      containers:
+        - name: minio-init
+          image: bitnamilegacy/minio:2025.7.23-debian-12-r5  # ships mc
+          command: ["/bin/sh", "/scripts/setup.sh"]
+          envFrom: [{secretRef: {name: app-env}}]
+          env: [{name: MC_CONFIG_DIR, value: /tmp/.mc}]
+          resources: {requests: {memory: 64Mi}, limits: {memory: 256Mi}}
+          volumeMounts: [{name: scripts, mountPath: /scripts}]
+      volumes: [{name: scripts, configMap: {name: minio-setup}}]
+---
+apiVersion: batch/v1
+kind: Job
+metadata: {name: opensearch-init, labels: {job: opensearch-init}}
+spec:
+  backoffLimit: 5
+  template:
+    spec:
+      restartPolicy: OnFailure
+      enableServiceLinks: false
+      containers:
+        - name: opensearch-init
+          image: python:3.11-slim
+          command: ["python", "/scripts/init.py"]
+          envFrom: [{secretRef: {name: app-env}}]
+          env:
+            - {name: OPENSEARCH_URL, value: "http://opensearch:9200"}
+            - {name: MODEL_SPEC, value: /scripts/model_spec.json}
+          resources: {requests: {memory: 64Mi}, limits: {memory: 256Mi}}
+          volumeMounts: [{name: scripts, mountPath: /scripts}]
+      volumes: [{name: scripts, configMap: {name: opensearch-init}}]
