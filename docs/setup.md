@@ -47,7 +47,7 @@ the GPU (check with `curl localhost:8000/health`, which reports `"device":"cuda"
 ## minikube
 
 ```bash
-bash infrastructure/k8s/deploy.sh   # starts minikube (8 GB, 4 CPUs) if needed, builds, deploys
+bash infrastructure/k8s/deploy.sh   # starts minikube (10 GB, 4 CPUs) if needed, builds, deploys
 make smoke TARGET=minikube
 kubectl -n search-engine port-forward svc/frontend 3000   # UI on http://localhost:3000
 ```

@@ -24,7 +24,7 @@ run_job() {  # Jobs are immutable: replace, then wait for completion
 if ! minikube status >/dev/null 2>&1; then
   gpu_flag=()
   if [ "$GPU" = 1 ]; then gpu_flag=(--gpus=all); fi
-  minikube start --driver=docker --container-runtime=docker --memory=8g --cpus=4 "${gpu_flag[@]}"
+  minikube start --driver=docker --container-runtime=docker --memory=10g --cpus=4 "${gpu_flag[@]}"
 fi
 if [ "$GPU" = 1 ]; then
   gpus=
@@ -72,7 +72,7 @@ restart_existing model-server
 k rollout status deploy/model-server --timeout=20m  # first start downloads the models
 k apply -f $K8S/apps.yaml -l 'app!=model-server'
 restart_existing ingestion dlq-retry search-worker backend frontend
-for d in tika redis search-worker backend frontend ingestion dlq-retry; do
+for d in tika redis opensearch-dashboards search-worker backend frontend ingestion dlq-retry; do
   k rollout status "deploy/$d" --timeout=5m
 done
 echo "Deployed to namespace $NS. Smoke test: make smoke TARGET=minikube"

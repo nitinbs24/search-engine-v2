@@ -24,10 +24,10 @@ def test_same_services_as_compose():
     assert workloads == set(COMPOSE["services"])
 
 
-def test_memory_requests_fit_an_8gb_minikube():
+def test_memory_requests_fit_a_10gb_minikube():
     # Jobs run one at a time; leave ~1 GiB for the minikube system pods.
     total = sum(mem(c, "requests") for c in containers("Deployment")) + max(mem(c, "requests") for c in containers("Job"))
-    assert total <= 7 * GI, total / GI
+    assert total <= 9 * GI, total / GI
     for c in containers("Deployment") + containers("Job"):
         assert mem(c, "requests") <= mem(c, "limits"), c["name"]
 

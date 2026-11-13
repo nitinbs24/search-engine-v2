@@ -144,6 +144,30 @@ spec: {selector: {app: opensearch}, ports: [{port: 9200}]}
 ---
 apiVersion: apps/v1
 kind: Deployment
+metadata: {name: opensearch-dashboards, labels: {app: opensearch-dashboards}}
+spec:
+  selector: {matchLabels: {app: opensearch-dashboards}}
+  template:
+    metadata: {labels: {app: opensearch-dashboards}}
+    spec:
+      enableServiceLinks: false
+      containers:
+        - name: opensearch-dashboards
+          image: opensearchproject/opensearch-dashboards:2.19.1
+          env:
+            - {name: OPENSEARCH_HOSTS, value: '["http://opensearch:9200"]'}
+            - {name: DISABLE_SECURITY_DASHBOARDS_PLUGIN, value: "true"}
+          ports: [{containerPort: 5601}]
+          readinessProbe: {httpGet: {path: /api/status, port: 5601}, periodSeconds: 10}
+          resources: {requests: {memory: 512Mi}, limits: {memory: 1Gi}}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: opensearch-dashboards}
+spec: {selector: {app: opensearch-dashboards}, ports: [{port: 5601}]}
+---
+apiVersion: apps/v1
+kind: Deployment
 metadata: {name: redis, labels: {app: redis}}
 spec:
   selector: {matchLabels: {app: redis}}
